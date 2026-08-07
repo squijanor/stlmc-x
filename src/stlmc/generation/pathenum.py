@@ -1,18 +1,36 @@
-"""Discrete path enumeration (kappa_path), radius 0, single depth.
+"""Discrete path enumeration (kappa_path).
 
-Enumerates structurally distinct counterexample paths at a fixed depth: solve
-the falsification encoding, record the counterexample, exclude its location word
-with a Boolean clause over the per-step mode variables, and re-solve until the
-encoding is unsatisfiable or the budget is reached. The radius-0 form excludes
-exactly one location word per found counterexample.
+Enumerates structurally distinct counterexample paths by blocking each found
+location word and re-solving. The sweep runs depths 1..N; at each depth it
+solves the falsification encoding, records the counterexample, excludes a
+Hamming-ball of radius r around its location word, and re-solves until the depth
+is exhausted or the pool budget is reached.
+
+The blocking predicate is a Boolean clause over the per-step mode variables:
+radius 0 excludes exactly one location word; radius r excludes every word within
+Hamming distance r of it.
 """
 
 from __future__ import annotations
 
 import re
+from functools import reduce
 from typing import Dict, List, Tuple
 
-from ..constraints.constraints import Constant, Formula, Neq, Or, Variable
+from ..constraints.constraints import (
+    Add,
+    And,
+    Constant,
+    Eq,
+    Formula,
+    Geq,
+    Implies,
+    Int,
+    IntVal,
+    Neq,
+    Or,
+    Variable,
+)
 from ..objects.algorithm import Algorithm
 from .encode import Encoder
 from .oracle import SAT, Z3IncrementalOracle
@@ -35,14 +53,32 @@ def _location_word(assn: Dict[Variable, Constant]) -> List[Tuple[Variable, Const
     return [(var, val) for _, var, val in steps]
 
 
-def block_exact_path(assn: Dict[Variable, Constant]) -> Formula:
-    """kappa_path^0: a clause excluding exactly the location word of ``assn``."""
+def block_radius(assn: Dict[Variable, Constant], radius: int, uid: int) -> Formula:
+    """Clause excluding every location word within Hamming distance ``radius`` of
+    ``assn``'s word. ``uid`` makes the radius>=1 indicator variables unique.
+
+    radius 0: ``OR_k (mode_k != w_k)`` -- excludes exactly the one word.
+    radius r: ``sum_k [mode_k != w_k] >= r+1`` via 0/1 indicators.
+    """
     word = _location_word(assn)
     if not word:
         raise RuntimeError(
             "no currentMode_k variables in assignment; model has no discrete modes to enumerate"
         )
-    return Or([Neq(var, val) for var, val in word])
+
+    if radius <= 0:
+        return Or([Neq(var, val) for var, val in word])
+
+    consts: List[Formula] = []
+    indicators: List[Variable] = []
+    for k, (var, val) in enumerate(word):
+        ind = Int("hb${}${}".format(uid, k))
+        indicators.append(ind)
+        consts.append(Or([Eq(ind, IntVal("0")), Eq(ind, IntVal("1"))]))
+        consts.append(Implies(Neq(var, val), Eq(ind, IntVal("1"))))
+        consts.append(Implies(Eq(var, val), Eq(ind, IntVal("0"))))
+    consts.append(Geq(reduce(Add, indicators), IntVal(str(radius + 1))))
+    return And(consts)
 
 
 def _gen_int(config, key: str):
@@ -63,7 +99,7 @@ def _z3_logic(config) -> str:
 
 
 class DiscretePathEnum(Algorithm):
-    """kappa_path at radius 0, enumerating distinct paths at the configured depth."""
+    """kappa_path: enumerate distinct paths over depths 1..N under a pool budget."""
 
     def __init__(self) -> None:
         self.debug_name = ""
@@ -73,7 +109,7 @@ class DiscretePathEnum(Algorithm):
 
     def run(self, model, goal, prop_dict, config, solver, logger, printer):
         common = config.get_section("common")
-        bound = int(common.get_value("bound"))
+        max_depth = int(common.get_value("bound"))
         tau_max = float(common.get_value("time-bound"))
         delta = float(common.get_value("threshold"))
         underlying = common.get_value("solver")
@@ -82,22 +118,34 @@ class DiscretePathEnum(Algorithm):
                 "kappa_path currently supports the z3 backend; got '{}'".format(underlying)
             )
 
-        budget = _gen_int(config, "k-paths")  # None -> enumerate to exhaustion
+        budget = _gen_int(config, "k-paths")  # None -> enumerate every depth to exhaustion
+        radius = _gen_int(config, "radius") or 0
+        logic = _z3_logic(config)
 
         encoder = Encoder(model, goal, prop_dict, delta, tau_max)
-        encoding = encoder.encode_at(bound)
-
-        oracle = Z3IncrementalOracle(_z3_logic(config))
-        oracle.assert_(encoding.consts)
-
         pool: List[Dict[Variable, Constant]] = []
-        while budget is None or len(pool) < budget:
-            if oracle.check() != SAT:
+        block_id = 0
+
+        for depth in range(1, max_depth + 1):
+            if budget is not None and len(pool) >= budget:
                 break
-            assn = oracle.model()
-            pool.append(assn)
-            oracle.assert_(block_exact_path(assn))
-            printer.print_verbose("[kappa_path] depth {}: {} path(s)".format(bound, len(pool)))
+
+            encoding = encoder.encode_at(depth)
+            oracle = Z3IncrementalOracle(logic)
+            oracle.assert_(encoding.consts)
+
+            while budget is None or len(pool) < budget:
+                if oracle.check() != SAT:
+                    break
+                assn = oracle.model()
+                pool.append(assn)
+                oracle.assert_(block_radius(assn, radius, block_id))
+                block_id += 1
+                printer.print_verbose(
+                    "[kappa_path] depth {}: {} path(s)".format(depth, len(pool))
+                )
+
+            encoder.reset()
 
         result = "False" if pool else "True"
-        return result, 0.0, bound, pool
+        return result, 0.0, max_depth, pool
