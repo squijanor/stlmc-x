@@ -1,4 +1,4 @@
-"""Region box discovery (kappa_box), C1: single-box frontier growth, no certificate.
+"""Region box discovery (kappa_box): single-box frontier growth, no certificate.
 
 Around a falsifying pivot on a fixed mode path, grow an axis-aligned box of
 initial conditions and collect a falsifying witness per expansion. A face grows
@@ -10,9 +10,9 @@ termination over a continuous region and spaces the witnesses.
 The pivot is taken at the shallowest depth that admits a counterexample; the box
 is grown there, which keeps the encoding small relative to the maximum depth.
 
-This is the witness-collecting slice of kappa_box. Face labeling (deep vs
+This module collects the witnesses of a single box. Face labeling (deep vs
 boundary, positive encoding), region blocking / re-pivoting, and cross-box
-thinning are later commits; here the pool is the collected witnesses of one box.
+thinning are not implemented here; the pool is the collected witnesses of one box.
 
 Initial-condition variables are the step-0 state copies ``<name>_0_0`` for each
 state variable named by ``range_dict``; mode variables are ``currentMode_k``.
@@ -100,7 +100,7 @@ def _box_of(box: Dict[Variable, List[Fraction]], skip: Variable) -> Formula:
 
 
 class RegionBoxDiscovery(Algorithm):
-    """kappa_box (C1): grow one witness box around a falsifying pivot."""
+    """kappa_box: grow one witness box around a falsifying pivot."""
 
     def __init__(self) -> None:
         self.debug_name = ""
