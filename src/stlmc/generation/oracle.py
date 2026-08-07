@@ -101,10 +101,12 @@ class GrowthOracle(abc.ABC):
 class Z3IncrementalOracle(GrowthOracle):
     """Raw ``z3.Solver`` with native push/pop for linear models."""
 
-    def __init__(self, logic: str = "QF_LRA") -> None:
+    def __init__(self, logic: str = "QF_LRA", seed: int | None = None) -> None:
         # z3 logic name ("QF_LRA" / "QF_NRA"). SolverFor enables the incremental
         # theory solver for that logic.
         self._solver = z3.SolverFor(logic)
+        if seed is not None:
+            self._solver.set("random_seed", int(seed))
         self._sat_seen = False
 
     def assert_(self, formula: Formula) -> None:

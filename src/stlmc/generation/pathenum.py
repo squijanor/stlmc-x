@@ -9,10 +9,16 @@ is exhausted or the pool budget is reached.
 The blocking predicate is a Boolean clause over the per-step mode variables:
 radius 0 excludes exactly one location word; radius r excludes every word within
 Hamming distance r of it.
+
+Reproducibility: the generation seed is -gen-seed if given (>= 0), otherwise the
+PYTHONHASHSEED value; one of the two must be present. The seed is passed to z3
+as its random_seed. Constraint ordering is fixed by PYTHONHASHSEED, which must
+be set for a run to be reproducible; z3's random_seed alone does not pin it.
 """
 
 from __future__ import annotations
 
+import os
 import re
 from functools import reduce
 from typing import Dict, List, Tuple
@@ -98,6 +104,24 @@ def _z3_logic(config) -> str:
     return "LRA"
 
 
+def _resolve_seed(config) -> int:
+    """The generation seed: -gen-seed if given (>= 0), else PYTHONHASHSEED.
+
+    Raises if neither is present, so a run is never silently non-reproducible.
+    """
+    common = config.get_section("common")
+    if common.is_argument_in("gen-seed"):
+        value = int(common.get_value("gen-seed"))
+        if value >= 0:
+            return value
+    hash_seed = os.environ.get("PYTHONHASHSEED")
+    if hash_seed is not None and hash_seed.isdigit():
+        return int(hash_seed)
+    raise ValueError(
+        "no generation seed: pass -gen-seed <n> or set PYTHONHASHSEED to a non-negative integer"
+    )
+
+
 class DiscretePathEnum(Algorithm):
     """kappa_path: enumerate distinct paths over depths 1..N under a pool budget."""
 
@@ -121,6 +145,14 @@ class DiscretePathEnum(Algorithm):
         budget = _gen_int(config, "k-paths")  # None -> enumerate every depth to exhaustion
         radius = _gen_int(config, "radius") or 0
         logic = _z3_logic(config)
+        seed = _resolve_seed(config)
+
+        hash_seed = os.environ.get("PYTHONHASHSEED")
+        if hash_seed is None or not hash_seed.isdigit():
+            printer.print_normal(
+                "warning: PYTHONHASHSEED is not fixed; constraint ordering is not pinned, "
+                "so the pool may vary run to run despite -gen-seed. Set PYTHONHASHSEED for reproducibility."
+            )
 
         encoder = Encoder(model, goal, prop_dict, delta, tau_max)
         pool: List[Dict[Variable, Constant]] = []
@@ -131,7 +163,7 @@ class DiscretePathEnum(Algorithm):
                 break
 
             encoding = encoder.encode_at(depth)
-            oracle = Z3IncrementalOracle(logic)
+            oracle = Z3IncrementalOracle(logic, seed)
             oracle.assert_(encoding.consts)
 
             while budget is None or len(pool) < budget:
