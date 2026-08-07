@@ -3,12 +3,12 @@ requires = ["scikit-build-core"]
 build-backend = "scikit_build_core.build"
 
 [project]
-name = "stlmc"
-version = "1.0.0.dev3"
-description = "An SMT-based bounded model checker for signal temporal logic"
+name = "stlmc-x"
+version = "0.1.0"
+description = "stlmc-x: a fork of STLMC (SMT-based bounded model checker for STL) adding diverse counterexample generation strategies"
 readme = "README.md"
 license.text = "GPLv3"
-keywords = ["stlmc", "model checker", "STL", "signal temporal logic", "bounded model checker"]
+keywords = ["stlmc", "model checker", "STL", "signal temporal logic", "bounded model checker", "counterexample generation", "diversity", "falsification",]
 requires-python = ">=3.8"
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -26,19 +26,27 @@ dependencies = [
   "scipy"
 ]
 
+# Original author of STLMC
 [[project.authors]]
 name  = "Geunyeol Yu"
 email = "rgyen@postech.ac.kr"
 
+# Fork owner / maintainer
+[[project.maintainers]]
+name  = "Sergio Quijano"
+email = "sergio.quijano.r@gmail.com"
+
 [project.scripts]
+# Fork CLI entry points. Upstream names kept as aliases for compatibility
+stlmc-x = "stlmc.cli.mc:main"
+stlmc-x-vis = "stlmc.cli.visualize:main"
 stlmc = "stlmc.cli.mc:main"
 stlmc-vis = "stlmc.cli.visualize:main"
 
 [project.urls]
-"Homepage"      = "https://stlmc.github.io/"
-"Bug Tracker"   = "https://github.com/stlmc/stlmc/issues"
-"Documentation" = "https://stlmc.github.io/assets/files/stlmc-manual.pdf"
-"Source Code"   = "https://github.com/stlmc/stlmc/"
+"Homepage"          = "https://github.com/squijanor/stlmc-x"
+"Upstream Homepage" = "https://stlmc.github.io/"
+"Upstream Source"   = "https://github.com/stlmc/stlmc/"
 
 [tool.scikit-build]
 sdist.include = ["src/", "3rd_party/", "tests/"]
