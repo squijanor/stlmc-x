@@ -50,3 +50,4 @@ stlmc-vis = "stlmc.cli.visualize:main"
 
 [tool.scikit-build]
 sdist.include = ["src/", "3rd_party/", "tests/"]
+wheel.packages = ["src/stlmc"]

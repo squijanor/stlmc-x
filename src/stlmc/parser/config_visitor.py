@@ -65,7 +65,7 @@ class ConfigVisitor(configVisitor):
         self.section_mandatory_dict["z3"] = set()
         self.section_mandatory_dict["yices"] = set()
         self.section_mandatory_dict["dreal"] = {"ode-step", "ode-order", "executable-path"}
-        self.section_mandatory_dict["gen"] = set()
+        # self.section_mandatory_dict["gen"] = set()
 
         self.section_selectable_dict: Dict[str, List[Set[str]]] = dict()
         self.section_selectable_dict["common"] = list()
