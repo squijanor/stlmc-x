@@ -16,6 +16,10 @@ def make_generation_algorithm(kind: str, config):
         from .pathenum import DiscretePathEnum
 
         return DiscretePathEnum()
-    if kind in ("box", "compose"):
-        raise NotImplementedError("generation strategy '{}' is not implemented yet".format(kind))
+    if kind == "box":
+        from .box import RegionBoxDiscovery
+
+        return RegionBoxDiscovery()
+    if kind == "compose":
+        raise NotImplementedError("generation strategy 'compose' is not implemented yet")
     raise ValueError("unknown generation strategy: {!r}".format(kind))
