@@ -1,26 +1,39 @@
-"""Region box discovery (kappa_box): single-box frontier growth, no certificate.
+"""Region box discovery (kappa_box): multi-box frontier growth, no certificate.
 
 Around a falsifying pivot on a fixed mode path, grow an axis-aligned box of
 initial conditions and collect a falsifying witness per expansion. A face grows
 by a minimum separation theta at a time: it expands only while a falsifying
 initial condition exists at least theta beyond the current bound, and stops when
 the falsifying region ends within theta (NEG-only). theta both guarantees
-termination over a continuous region and spaces the witnesses.
-
-The pivot is taken at the shallowest depth that admits a counterexample; the box
-is grown there, which keeps the encoding small relative to the maximum depth.
+termination over a continuous region and spaces the witnesses. Each pivot is
+taken at the shallowest depth that admits a counterexample outside the already
+discovered regions, which keeps the encoding small relative to the maximum
+depth.
 
 Each witness is labeled by where it sits in the falsifying set. The interior
-witnesses collected during growth are ``deep``. After growth converges, each
-face is examined once: if the falsifying set reaches the variable's declared
+witnesses collected during growth are ``deep``. After a box's growth converges,
+each face is examined once: if the falsifying set reaches the variable's declared
 range edge, the face's marker is ``domain`` (the extent is the model domain, not
 the falsifying frontier); otherwise the frontier is strictly interior and is
 located by bisecting the theta-gap between the last falsifying bound and the
 first non-falsifying point, giving a ``boundary`` marker at the frontier. On a
 fixed mode path with linear dynamics the falsifying initial-condition set is a
 convex polytope, so this bisection locates the exact frontier without a positive
-(quantified) encoding. Region blocking / re-pivoting and cross-box thinning are
-not implemented here; the pool is the labeled witnesses of one box.
+(quantified) encoding.
+
+After a box is grown and labeled, its axis-aligned region is blocked (its
+negation is asserted for every subsequent pivot search) and a new pivot is
+sought outside all blocked regions; the loop repeats until no falsifying pivot
+remains or the ``[gen] k-ic`` box budget is reached. The blocked region is the
+box extended by theta on every face: at convergence the point theta beyond each
+face is non-falsifying, so extending the block to it covers the whole falsifying
+region and leaves no sliver between the theta-quantized box and the true frontier
+for a re-pivot to land in. A fresh pivot then lands on whatever mode path its
+initial condition uses, in a genuinely distinct region, so boxes span different
+paths. Thinning (``[gen] thin-ic``) drops a new deep witness that lies within
+thin-ic (per axis) of a witness already in the pool; boundary and domain markers
+are exempt and always kept, since they mark the frontier. The default of 0 leaves
+thinning off.
 
 Initial-condition variables are the step-0 state copies ``<name>_0_0`` for each
 state variable named by ``range_dict``; mode variables are ``currentMode_k``.
@@ -46,7 +59,10 @@ from ..constraints.constraints import (
     Eq,
     Formula,
     Geq,
+    Gt,
     Leq,
+    Lt,
+    Or,
     RealVal,
     Variable,
 )
@@ -169,8 +185,35 @@ def _bisect_frontier(
     return sat
 
 
+def _block_box(bounds: Dict[Variable, Tuple[Fraction, Fraction]]) -> Formula:
+    """Negation of a box: ``OR_i (x_i < lo_i OR x_i > hi_i)``.
+
+    Asserted for later pivot searches so no subsequent pivot falls inside this
+    box's region."""
+    terms: List[Formula] = []
+    for var, (lo, hi) in bounds.items():
+        terms.append(Lt(var, _rv(lo)))
+        terms.append(Gt(var, _rv(hi)))
+    return Or(terms) if terms else BoolVal("False")
+
+
+def _too_close(
+    witness: Dict[Variable, Constant],
+    pool: List[Dict[Variable, Constant]],
+    ic_vars,
+    thin: Fraction,
+) -> bool:
+    """True if ``witness`` lies within ``thin`` of some pooled witness on every
+    initial-condition axis (an L-infinity ball of radius ``thin``)."""
+    for other in pool:
+        if all(abs(_value_of(witness, v) - _value_of(other, v)) < thin for v in ic_vars):
+            return True
+    return False
+
+
 class RegionBoxDiscovery(Algorithm):
-    """kappa_box: grow one witness box around a falsifying pivot."""
+    """kappa_box: grow labeled witness boxes around falsifying pivots, blocking
+    each discovered region and re-pivoting under a box budget."""
 
     def __init__(self) -> None:
         self.debug_name = ""
@@ -182,14 +225,24 @@ class RegionBoxDiscovery(Algorithm):
         self.debug_name = msg
 
     def _find_pivot(
-        self, encoder: Encoder, max_depth: int, logic: str, seed: int, printer
+        self,
+        encoder: Encoder,
+        max_depth: int,
+        logic: str,
+        seed: int,
+        blocks: List[Formula],
+        printer,
     ):
         """Sweep depths 1..N; return (depth, oracle, pivot model, encoding) for
-        the first satisfiable depth, or (None, None, None, None)."""
+        the first depth that admits a falsifying assignment outside every blocked
+        region, or (None, None, None, None). The returned oracle carries the
+        encoding and the blocks, ready for growth."""
         for depth in range(1, max_depth + 1):
             encoding = encoder.encode_at(depth)
             oracle = Z3IncrementalOracle(logic, seed)
             oracle.assert_(encoding.consts)
+            for block in blocks:
+                oracle.assert_(block)
             if oracle.check() == SAT:
                 printer.print_verbose("[kappa_box] pivot at depth {}".format(depth))
                 return depth, oracle, oracle.model(), encoding
@@ -256,38 +309,19 @@ class RegionBoxDiscovery(Algorithm):
                     )
         return markers, labels
 
-    def run(self, model, goal, prop_dict, config, solver, logger, printer):
-        common = config.get_section("common")
-        max_depth = int(common.get_value("bound"))
-        tau_max = float(common.get_value("time-bound"))
-        delta = float(common.get_value("threshold"))
-        underlying = common.get_value("solver")
-        if underlying != "z3":
-            raise NotImplementedError(
-                "kappa_box currently supports the z3 backend; got '{}'".format(underlying)
-            )
-
-        logic = _z3_logic(config)
-        seed = _resolve_seed(config)
-        theta = _gen_frac(config, "epsilon", "0.01")  # min IC separation / granularity
-        bisect_iters = _gen_int(config, "bisect-iters") or _BISECT_ITERS
-
-        hash_seed = os.environ.get("PYTHONHASHSEED")
-        if hash_seed is None or not hash_seed.isdigit():
-            printer.print_normal(
-                "warning: PYTHONHASHSEED is not fixed; constraint ordering is not pinned, "
-                "so results may vary run to run. Set PYTHONHASHSEED for reproducibility."
-            )
-
-        encoder = Encoder(model, goal, prop_dict, delta, tau_max)
-        depth, oracle, pivot, encoding = self._find_pivot(
-            encoder, max_depth, logic, seed, printer
-        )
-        if pivot is None:
-            return "True", 0.0, max_depth, []
-
-        oracle.assert_(_mode_fix(pivot))  # pin the path for the rest of the run
-
+    def _grow_box(
+        self,
+        oracle: GrowthOracle,
+        pivot: Dict[Variable, Constant],
+        encoding,
+        theta: Fraction,
+        iters: int,
+        depth: int,
+        printer,
+    ) -> Tuple[List[Dict[Variable, Constant]], List[str], Dict[Variable, List[Fraction]]]:
+        """Grow and label one box around ``pivot`` on ``oracle`` (which already
+        carries the encoding, the blocks, and the pinned mode path). Returns the
+        box's witnesses, their labels, and the final box bounds."""
         ic = _ic_pivots(pivot, encoding.range_dict)
         if not ic:
             raise RuntimeError(
@@ -297,9 +331,6 @@ class RegionBoxDiscovery(Algorithm):
         box: Dict[Variable, List[Fraction]] = {v: [p, p] for v, p in ic.items()}
         witnesses: List[Dict[Variable, Constant]] = [pivot]
         labels: List[str] = [_DEEP]
-        printer.print_verbose(
-            "[kappa_box] depth {}: growing IC box over {} dim(s)".format(depth, len(box))
-        )
 
         changed = True
         passes = 0
@@ -342,19 +373,92 @@ class RegionBoxDiscovery(Algorithm):
 
         ranges = _ic_ranges(box, encoding.range_dict)
         markers, marker_labels = self._label_faces(
-            oracle, box, ranges, theta, bisect_iters, printer
+            oracle, box, ranges, theta, iters, printer
         )
         witnesses.extend(markers)
         labels.extend(marker_labels)
+        return witnesses, labels, box
+
+    def run(self, model, goal, prop_dict, config, solver, logger, printer):
+        common = config.get_section("common")
+        max_depth = int(common.get_value("bound"))
+        tau_max = float(common.get_value("time-bound"))
+        delta = float(common.get_value("threshold"))
+        underlying = common.get_value("solver")
+        if underlying != "z3":
+            raise NotImplementedError(
+                "kappa_box currently supports the z3 backend; got '{}'".format(underlying)
+            )
+
+        logic = _z3_logic(config)
+        seed = _resolve_seed(config)
+        theta = _gen_frac(config, "epsilon", "0.01")  # min IC separation / granularity
+        bisect_iters = _gen_int(config, "bisect-iters") or _BISECT_ITERS
+        max_boxes = _gen_int(config, "k-ic")  # None -> until falsification is exhausted
+        thin = _gen_frac(config, "thin-ic", "0")  # 0 -> no cross-box thinning
+
+        hash_seed = os.environ.get("PYTHONHASHSEED")
+        if hash_seed is None or not hash_seed.isdigit():
+            printer.print_normal(
+                "warning: PYTHONHASHSEED is not fixed; constraint ordering is not pinned, "
+                "so results may vary run to run. Set PYTHONHASHSEED for reproducibility."
+            )
+
+        encoder = Encoder(model, goal, prop_dict, delta, tau_max)
+        blocks: List[Formula] = []
+        pool: List[Dict[Variable, Constant]] = []
+        labels: List[str] = []
+        first_depth = max_depth
+        box_index = 0
+
+        while max_boxes is None or box_index < max_boxes:
+            depth, oracle, pivot, encoding = self._find_pivot(
+                encoder, max_depth, logic, seed, blocks, printer
+            )
+            if pivot is None:
+                break
+            if box_index == 0:
+                first_depth = depth
+
+            oracle.assert_(_mode_fix(pivot))  # pin this box's path
+            witnesses, box_labels, box = self._grow_box(
+                oracle, pivot, encoding, theta, bisect_iters, depth, printer
+            )
+            box_index += 1
+
+            kept = 0
+            for witness, label in zip(witnesses, box_labels):
+                # Thin only deep (interior) witnesses; boundary and domain
+                # markers mark the frontier and are always kept.
+                if thin > 0 and label == _DEEP and _too_close(witness, pool, box.keys(), thin):
+                    continue
+                pool.append(witness)
+                labels.append(label)
+                kept += 1
+
+            # Block the box extended by theta on every face. At convergence the
+            # point theta beyond each face is non-falsifying, so extending the
+            # block to it leaves no falsifying sliver between the theta-quantized
+            # box and the true frontier for a later pivot to land in.
+            block_bounds = {v: (lo - theta, hi + theta) for v, (lo, hi) in box.items()}
+            blocks.append(_block_box(block_bounds))
+            printer.print_verbose(
+                "[kappa_box] box {} at depth {}: kept {}/{} witness(es); pool {}".format(
+                    box_index, depth, kept, len(witnesses), len(pool)
+                )
+            )
+            encoder.reset()  # clean slate before the next pivot search
+
         self.ce_labels = labels
         printer.print_verbose(
-            "[kappa_box] {} witnesses: {} deep, {} boundary, {} domain".format(
-                len(witnesses),
+            "[kappa_box] {} box(es), {} witnesses: {} deep, {} boundary, {} domain".format(
+                box_index,
+                len(pool),
                 labels.count(_DEEP),
                 labels.count(_BOUNDARY),
                 labels.count(_DOMAIN),
             )
         )
 
-        result = "False" if witnesses else "True"
-        return result, 0.0, depth, witnesses
+        result = "False" if pool else "True"
+        return result, 0.0, first_depth, pool
