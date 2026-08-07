@@ -1,10 +1,17 @@
 """Discrete path enumeration (kappa_path).
 
 Enumerates structurally distinct counterexample paths by blocking each found
-location word and re-solving. The sweep runs depths 1..N; at each depth it
-solves the falsification encoding, records the counterexample, excludes a
-Hamming-ball of radius r around its location word, and re-solves until the depth
-is exhausted or the pool budget is reached.
+location word and re-solving. The traversal visits a set of target depths --
+``[gen] depths`` as a slash-separated list (e.g. ``"8/9/10/11"``), or every depth
+1..N by default -- and at each
+target depth it solves the falsification encoding, records the counterexample,
+excludes a Hamming-ball of radius r around its location word, and re-solves until
+that depth is exhausted or its per-depth budget is reached.
+
+The budget ``[gen] k-paths`` is per target depth, not global: each targeted depth
+contributes up to that many paths, so the pool is depth-uniform (every targeted
+depth is filled to the same density) rather than front-loaded onto the shallowest
+depths. Absent, a depth is enumerated to exhaustion.
 
 The blocking predicate is a Boolean clause over the per-step mode variables:
 radius 0 excludes exactly one location word; radius r excludes every word within
@@ -97,6 +104,24 @@ def _gen_int(config, key: str):
     return None
 
 
+def _gen_depths(config, max_depth: int) -> List[int]:
+    """Target depths: the ``[gen] depths`` list clamped to 1..max_depth, or every
+    depth 1..max_depth when absent.
+
+    The list is slash-separated (e.g. ``"8/9/10/11"``): the config grammar lexes a
+    bare number as a NUMBER token and accepts only a single VALUE token inside
+    quotes, and a VALUE may contain ``/`` -- so ``"8/9/10/11"`` is one token while
+    ``"8,9,10,11"`` does not parse. Commas are still tolerated if they get through.
+    """
+    if config.is_section_in("gen"):
+        section = config.get_section("gen")
+        if section.is_argument_in("depths"):
+            raw = str(section.get_value("depths"))
+            picked = sorted({int(tok) for tok in re.split(r"[,/]", raw) if tok.strip()})
+            return [d for d in picked if 1 <= d <= max_depth]
+    return list(range(1, max_depth + 1))
+
+
 def _z3_logic(config) -> str:
     if config.is_section_in("z3"):
         z3_section = config.get_section("z3")
@@ -139,7 +164,8 @@ class DiscretePathEnum(Algorithm):
         delta = float(common.get_value("threshold"))
         underlying = common.get_value("solver")
 
-        budget = _gen_int(config, "k-paths")  # None -> enumerate every depth to exhaustion
+        per_depth = _gen_int(config, "k-paths")  # per target depth; None -> exhaust
+        target_depths = _gen_depths(config, max_depth)
         radius = _gen_int(config, "radius") or 0
         logic = _z3_logic(config)
         seed = _resolve_seed(config)
@@ -166,23 +192,24 @@ class DiscretePathEnum(Algorithm):
         pool: List[Dict[Variable, Constant]] = []
         block_id = 0
 
-        for depth in range(1, max_depth + 1):
-            if budget is not None and len(pool) >= budget:
-                break
-
+        for depth in target_depths:
             encoding = encoder.encode_at(depth)
             oracle = new_oracle()
             oracle.assert_(encoding.consts)
 
-            while budget is None or len(pool) < budget:
+            found = 0
+            while per_depth is None or found < per_depth:
                 if oracle.check() != SAT:
                     break
                 assn = oracle.model()
                 pool.append(assn)
                 oracle.assert_(block_radius(assn, radius, block_id))
                 block_id += 1
+                found += 1
                 printer.print_verbose(
-                    "[kappa_path] depth {}: {} path(s)".format(depth, len(pool))
+                    "[kappa_path] depth {}: {} path(s) here, {} total".format(
+                        depth, found, len(pool)
+                    )
                 )
 
             encoder.reset()
