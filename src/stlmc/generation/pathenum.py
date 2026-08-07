@@ -11,9 +11,10 @@ radius 0 excludes exactly one location word; radius r excludes every word within
 Hamming distance r of it.
 
 Reproducibility: the generation seed is -gen-seed if given (>= 0), otherwise the
-PYTHONHASHSEED value; one of the two must be present. The seed is passed to z3
-as its random_seed. Constraint ordering is fixed by PYTHONHASHSEED, which must
-be set for a run to be reproducible; z3's random_seed alone does not pin it.
+PYTHONHASHSEED value; one of the two must be present. For the z3 backend the
+seed is passed as its random_seed. Constraint ordering is fixed by
+PYTHONHASHSEED, which must be set for a run to be reproducible; z3's random_seed
+alone does not pin it.
 """
 
 from __future__ import annotations
@@ -39,7 +40,7 @@ from ..constraints.constraints import (
 )
 from ..objects.algorithm import Algorithm
 from .encode import Encoder
-from .oracle import SAT, Z3IncrementalOracle
+from .oracle import SAT, make_oracle
 
 # Per-step mode index variable produced by the encoding: currentMode_<step>.
 _MODE_RE = re.compile(r"^currentMode_(\d+)$")
@@ -137,10 +138,6 @@ class DiscretePathEnum(Algorithm):
         tau_max = float(common.get_value("time-bound"))
         delta = float(common.get_value("threshold"))
         underlying = common.get_value("solver")
-        if underlying != "z3":
-            raise NotImplementedError(
-                "kappa_path currently supports the z3 backend; got '{}'".format(underlying)
-            )
 
         budget = _gen_int(config, "k-paths")  # None -> enumerate every depth to exhaustion
         radius = _gen_int(config, "radius") or 0
@@ -154,6 +151,17 @@ class DiscretePathEnum(Algorithm):
                 "so the pool may vary run to run despite -gen-seed. Set PYTHONHASHSEED for reproducibility."
             )
 
+        # z3 uses logic/seed; dreal uses config/logger/time-bound.
+        def new_oracle():
+            return make_oracle(
+                underlying,
+                logic=logic,
+                seed=seed,
+                config=config,
+                logger=logger,
+                time_bound=tau_max,
+            )
+
         encoder = Encoder(model, goal, prop_dict, delta, tau_max)
         pool: List[Dict[Variable, Constant]] = []
         block_id = 0
@@ -163,7 +171,7 @@ class DiscretePathEnum(Algorithm):
                 break
 
             encoding = encoder.encode_at(depth)
-            oracle = Z3IncrementalOracle(logic, seed)
+            oracle = new_oracle()
             oracle.assert_(encoding.consts)
 
             while budget is None or len(pool) < budget:

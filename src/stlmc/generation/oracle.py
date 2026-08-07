@@ -21,7 +21,10 @@ unsatisfiable one as ``"True"``. This oracle uses native verdicts instead:
 :data:`SAT` / :data:`UNSAT` / :data:`UNKNOWN`. :class:`Z3IncrementalOracle`
 talks to a raw ``z3.Solver`` and needs no translation.
 :class:`DrealReSolveOracle` goes through the wrapped ``dRealSolver`` and performs
-the translation in :meth:`DrealReSolveOracle.check`.
+the translation in :meth:`DrealReSolveOracle.check`. dReal is a delta-decision
+procedure: a :data:`SAT` verdict is delta-sat, so the assignment it returns
+(the midpoint of dReal's delta-box) satisfies a delta-relaxation of the
+constraints rather than the exact constraints.
 
 Import paths assume this module is ``stlmc/generation/oracle.py`` with package
 root ``stlmc``.
@@ -142,9 +145,6 @@ class DrealReSolveOracle(GrowthOracle):
     dReal is subprocess-based with no incremental interface, so every ``check``
     conjoins the whole live assertion stack and re-solves. Delta-sat is reported
     as :data:`SAT`.
-
-    ``_solve_once`` is not implemented; a reference implementation is given in
-    its docstring. The frame/stack machinery around it is complete.
     """
 
     def __init__(self, config, logger=None, time_bound: str | None = None) -> None:
@@ -186,25 +186,48 @@ class DrealReSolveOracle(GrowthOracle):
         return self._last_model
 
     def _solve_once(self, consts: Formula):
-        """Run one dReal solve over ``consts``.
+        """Solve ``consts`` with a fresh ``dRealSolver`` configured from the
+        run's [dreal] section. Returns ``(result_str, assignment_or_None)`` in
+        the wrapped-solver convention: ``"False"`` == (delta-)satisfiable,
+        ``"True"`` == unsatisfiable, ``"Unknown"`` otherwise. The assignment is
+        read only on a satisfiable result."""
+        from ..solver.dreal import dRealSolver
 
-        Returns ``(result_str, assignment_dict_or_None)``, where ``result_str``
-        follows the wrapped-solver convention: ``"False"`` == satisfiable,
-        ``"True"`` == unsatisfiable, ``"Unknown"`` otherwise.
+        solver = dRealSolver()
+        solver.set_config(self._config)
+        if self._logger is not None:
+            solver.append_logger(self._logger)
+        if self._time_bound is not None:
+            solver.set_time_bound(self._time_bound)
+        result, _size = solver.solve(consts, None, None)
+        model = solver.make_assignment().get_assignments() if result == "False" else None
+        return result, model
 
-        Reference implementation:
-            from ..solver.dreal import dRealSolver
-            s = dRealSolver()
-            s.set_config(self._config)
-            if self._logger is not None:
-                s.append_logger(self._logger)
-            if self._time_bound is not None:
-                s.set_time_bound(self._time_bound)
-            result, _size = s.solve(consts, None, None)
-            model = s.make_assignment().get_assignments() if result == "False" else None
-            return result, model
-        """
-        raise NotImplementedError("DrealReSolveOracle._solve_once is not implemented")
+
+# =========================================================================== #
+#  Backend factory
+# =========================================================================== #
+def make_oracle(
+    underlying: str,
+    *,
+    logic: str = "QF_LRA",
+    seed: int | None = None,
+    config=None,
+    logger=None,
+    time_bound=None,
+) -> GrowthOracle:
+    """A fresh :class:`GrowthOracle` for the configured backend.
+
+    ``z3`` uses the native incremental solver (``logic`` and ``seed``); ``dreal``
+    uses the stateless re-solve backend (``config``, ``logger``, ``time_bound``).
+    """
+    if underlying == "z3":
+        return Z3IncrementalOracle(logic, seed)
+    if underlying == "dreal":
+        return DrealReSolveOracle(config, logger, time_bound)
+    raise NotImplementedError(
+        "generation supports the z3 and dreal backends; got '{}'".format(underlying)
+    )
 
 
 # =========================================================================== #

@@ -21,6 +21,12 @@ fixed mode path with linear dynamics the falsifying initial-condition set is a
 convex polytope, so this bisection locates the exact frontier without a positive
 (quantified) encoding.
 
+This strategy requires the z3 backend. Growth and labeling pin the mode path and
+constrain the initial condition to a box, and dreal returns ``unknown`` for such
+mode-pinned initial-condition queries over nonlinear ODE dynamics, so no box
+grows; a nonlinear (interval / free-mode) formulation is future work. dreal runs
+use kappa_path, which poses no such queries.
+
 After a box is grown and labeled, its axis-aligned region is blocked (its
 negation is asserted for every subsequent pivot search) and a new pivot is
 sought outside all blocked regions; the loop repeats until no falsifying pivot
@@ -387,7 +393,10 @@ class RegionBoxDiscovery(Algorithm):
         underlying = common.get_value("solver")
         if underlying != "z3":
             raise NotImplementedError(
-                "kappa_box currently supports the z3 backend; got '{}'".format(underlying)
+                "kappa_box requires the z3 backend: growth and labeling pin the mode "
+                "path and box the initial condition, and dreal returns 'unknown' for "
+                "such queries over nonlinear ODE dynamics. Use kappa_path on dreal, or "
+                "z3 for kappa_box."
             )
 
         logic = _z3_logic(config)
