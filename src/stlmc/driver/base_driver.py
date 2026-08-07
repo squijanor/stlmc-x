@@ -307,9 +307,29 @@ class BaseRunner(Runner):
                         output_name = "{}_b{}_{}_{}".format(os.path.basename(file_name).split(".")[0], bound, label,
                                                             underlying_solver)
                         import pickle
-                        with open("{}.counterexample".format(output_name), "wb") as fw:
-                            pickle.dump((assn_dict, model.modules, model.mode_var_dict, model.prop_dict,
-                                         model.range_dict, PD, goal.get_formula(), label, float(delta)), fw)
+
+                        # A generation strategy returns a pool (list of assignment dicts) and
+                        # writes ".counterexamples"; a single-CE run returns one dict and writes
+                        # ".counterexample". A strategy may expose per-CE labels on its ce_labels
+                        # attribute, appended as a tenth payload element when present.
+                        is_pool = isinstance(assn_dict, list)
+                        ext = "counterexamples" if is_pool else "counterexample"
+                        ce_labels = getattr(algorithm, "ce_labels", None)
+                        payload = (
+                            assn_dict,
+                            model.modules,
+                            model.mode_var_dict,
+                            model.prop_dict,
+                            model.range_dict,
+                            PD,
+                            goal.get_formula(),
+                            label,
+                            float(delta),
+                        )
+                        if ce_labels is not None:
+                            payload = payload + (ce_labels,)
+                        with open("{}.{}".format(output_name, ext), "wb") as fw:
+                            pickle.dump(payload, fw)
 
                         cfg_string = ["{", "# state variables: {}".format(
                             " , ".join(map(lambda x: x.id, model.range_dict.keys())))]
@@ -331,7 +351,7 @@ class BaseRunner(Runner):
                         f = open("{}.cfg".format(output_name), "w")
                         f.write("\n".join(cfg_string))
                         f.close()
-                        print("generate {}.counterexample and {}.cfg".format(output_name, output_name))
+                        print("generate {}.{} and {}.cfg".format(output_name, ext, output_name))
         except SyntaxError as e:
             print("syntax error: {}".format(e))
         except Exception as e:
