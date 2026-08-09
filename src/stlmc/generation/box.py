@@ -99,19 +99,10 @@ _MAX_STEPS = 10000
 # frontier is within theta * 2**-_BISECT_ITERS of the true crossing.
 _BISECT_ITERS = 20
 
-# Defaults for [gen] pivot-timeout, which bounds ONE solver call in the pivot
-# search. The two paths need different numbers and setting them equal would
-# damage one of them, so they are named separately rather than reconciled:
-#
-#   monolithic path   one query decides the whole depth, so it is given room.
-#   two-step path     one query decides one candidate out of hundreds, and the
-#                     search as a whole is bounded by [gen] pivot-budget; a
-#                     per-call value near the budget lets a single candidate
-#                     consume all of it.
-#
-# An explicit [gen] pivot-timeout overrides both, and the run banner prints the
-# value in force for the active path.
-_DEFAULT_PIVOT_TIMEOUT = 600.0
+# Default for [gen] pivot-timeout, which bounds ONE solver call inside the pivot
+# search. One call decides one candidate out of many and the search as a whole is
+# bounded by [gen] pivot-budget, so a per-call value near that budget would let a
+# single candidate consume all of it.
 _DEFAULT_CANDIDATE_TIMEOUT = 45.0
 
 # Ceiling on the number of lattice cells harvested from one box. The lattice
@@ -593,28 +584,17 @@ class RegionBoxDiscovery(Algorithm):
                         break
             pinned = And([_skeleton_fix(real)] + fa_terms) if fa_terms \
                 else _skeleton_fix(real)
-            # Block exactly what was tested. The candidate is checked with the
-            # WHOLE propositional assignment pinned, so a rejection refutes that
-            # assignment and nothing more. Blocking only the (mode word, forall)
-            # class would exclude assignments never tried -- cheaper per round,
-            # but it discards feasible structures, and the number discarded per
-            # rejection grows with depth. [gen] block-class = 1 restores the
-            # cheaper, incomplete behaviour.
-            mode_terms = [Eq(v, c) for v, c in candidate.items()
-                          if _MODE_RE.match(v.id)]
-            if _gen_int(self._config, "block-class") == 1:
-                fa_choice = [b if str(c.value) == "True" else Not(b)
-                             for b in fa_map
-                             for v, c in candidate.items() if v.id == b.id]
-                block_this = And(mode_terms + fa_choice) \
-                    if (mode_terms or fa_choice) else _skeleton_fix(candidate)
-            else:
-                # z3-expressible counterpart of `pinned`: the full propositional
-                # assignment, including the forall_t abstraction Bools (whose
-                # truth values are what selected the formulas pinned for dReal).
-                # `pinned` itself carries real forall_t nodes and cannot go back
-                # into z3.
-                block_this = _skeleton_fix(candidate)
+            # Block exactly what was tested: the candidate is checked with the
+            # whole propositional assignment pinned, so a rejection refutes that
+            # assignment and nothing more. Blocking the (mode word, forall) class
+            # instead would exclude assignments never tried, and the number
+            # discarded per rejection grows with depth.
+            #
+            # This is the z3-expressible counterpart of `pinned`, including the
+            # forall_t abstraction Bools whose truth values selected the formulas
+            # pinned for dReal; `pinned` itself carries real forall_t nodes and
+            # cannot go back into z3.
+            block_this = _skeleton_fix(candidate)
 
             d = make_oracle(self._underlying, logic=logic, seed=seed,
                             config=self._config, logger=self._logger,
@@ -669,25 +649,15 @@ class RegionBoxDiscovery(Algorithm):
         The returned oracle carries the encoding and the blocks, ready for growth;
         the caller resets the encoder after using the returned encoding."""
         encoding = encoder.encode_at(depth)
-        if getattr(self, "_underlying", "z3") != "z3" and _gen_int(
-                self._config, "two-step-pivot") != 0:
+        if getattr(self, "_underlying", "z3") != "z3":
             return self._pivot_two_step(encoding, logic, seed, blocks)
-        if getattr(self, "_underlying", "z3") == "z3":
-            oracle = Z3IncrementalOracle(logic, seed)
-        else:
-            from .oracle import make_oracle
-            oracle = make_oracle(
-                self._underlying, logic=logic, seed=seed, config=self._config,
-                logger=self._logger, time_bound=self._tau_max)
+        # Only the exact backend reaches here; a delta backend always takes the
+        # two-step path above.
+        oracle = Z3IncrementalOracle(logic, seed)
         oracle.assert_(encoding.consts)
         for block in blocks:
             oracle.assert_(block)
-        if hasattr(oracle, "set_budget"):
-            oracle.set_budget(_gen_float(self._config, "pivot-timeout")
-                              or _DEFAULT_PIVOT_TIMEOUT)
         v = oracle.check()
-        if hasattr(oracle, "set_budget"):
-            oracle.set_budget("unset")
         if v == SAT:
             return oracle, oracle.model(), encoding
         # UNSAT means the region is exhausted; UNKNOWN means the solver gave up.
@@ -1021,7 +991,7 @@ class RegionBoxDiscovery(Algorithm):
         if lattice:
             sweeps = [(None, self._harvest_lattice(
                 oracle, box, theta, budget,
-                _gen_int(self._config, "lattice-max") or _LATTICE_MAX))]
+                _LATTICE_MAX))]
         else:
             sweeps = [(var, self._harvest(
                 oracle, var, _box_of(box, var, oracle.rv), box[var][0],
@@ -1207,22 +1177,19 @@ class RegionBoxDiscovery(Algorithm):
             # A configuration still setting a removed key would otherwise get
             # silence, which reads as the key being in effect.
             for gone in ("word-pruning", "word-check-timeout",
-                         "assume-monotone-flows"):
+                         "assume-monotone-flows", "block-class",
+                         "two-step-pivot", "warm-start", "lattice-max"):
                 if _gen_int(config, gone) is not None:
                     printer.print_normal(
                         "warning: [gen] {} no longer exists and is "
                         "ignored".format(gone))
 
-            two_step = _gen_int(config, "two-step-pivot") != 0
             printer.print_normal(
-                "[kappa_box] two-step-pivot={}, block={}, "
-                "word-rotate={}".format(
-                    "on" if two_step else "off",
-                    "class" if _gen_int(config, "block-class") == 1 else "assignment",
+                "[kappa_box] word-rotate={}".format(
                     30 if _gen_int(config, "word-rotate") is None
                     else (_gen_int(config, "word-rotate") or "off")))
-            pivot_timeout = _gen_float(config, "pivot-timeout") or (
-                _DEFAULT_CANDIDATE_TIMEOUT if two_step else _DEFAULT_PIVOT_TIMEOUT)
+            pivot_timeout = (_gen_float(config, "pivot-timeout")
+                             or _DEFAULT_CANDIDATE_TIMEOUT)
             printer.print_normal(
                 "[kappa_box/delta] solver budgets: query-timeout={}s, "
                 "pivot-timeout={}s per {}, pivot-budget={}s per depth "
@@ -1255,16 +1222,14 @@ class RegionBoxDiscovery(Algorithm):
                             "raise [gen] pivot-timeout to search further".format(depth))
                     else:
                         # UNSAT: the structure space is exhausted. What that is
-                        # worth depends on what was pruned -- word rotation and
-                        # block-class remove structures the solver never tried,
-                        # so under either it means no further structure is
-                        # reachable, not that none exists.
+                        # worth depends on what was pruned -- word rotation
+                        # removes structures the solver never tried, so under it
+                        # this means no further structure is reachable, not that
+                        # none exists.
                         heuristic = []
                         if self._rotated_words:
                             heuristic.append("{} word(s) rotated off".format(
                                 self._rotated_words))
-                        if _gen_int(config, "block-class") == 1:
-                            heuristic.append("block-class = 1")
                         scope = ("no counterexample at this depth"
                                  if not blocks else
                                  "no counterexample outside the {} box(es) already "
@@ -1273,8 +1238,8 @@ class RegionBoxDiscovery(Algorithm):
                             printer.print_normal(
                                 "[kappa_box] depth {}: structure space exhausted, "
                                 "but heuristic pruning was active ({}) -- absence is "
-                                "NOT established; re-run with word-rotate = 0 and "
-                                "block-class unset to make it conclusive".format(
+                                "NOT established; re-run with word-rotate = 0 "
+                                "to make it conclusive".format(
                                     depth, ", ".join(heuristic)))
                         else:
                             printer.print_normal(
