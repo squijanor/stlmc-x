@@ -21,7 +21,6 @@ from ..solver.solver_factory import SolverFactory
 from ..solver.z3 import z3Obj
 from ..util.logger import *
 from ..util.print import *
-from ..visualize.visualizer import Visualizer
 from ..visualize.visualizer import sub_formula as vis_sub_formula
 
 
@@ -54,11 +53,21 @@ class BaseCmdParser(CmdParser):
         self.config = Configuration()
         self.built_in_names = ["file", "model_cfg", "model_specific_cfg"]
 
-        self.parser = argparse.ArgumentParser(description='For more information. See below:')
-        self.parser.add_argument('file', nargs='?', type=str, help="Type file or directory to process")
-        self.parser.add_argument('-default-cfg', type=str, help="system configuration file")
-        self.parser.add_argument('-model-cfg', type=str, help="model configuration file")
-        self.parser.add_argument('-model-specific-cfg', type=str, help="model-specific configuration file")
+        self.parser = argparse.ArgumentParser(
+            description="For more information. See below:"
+        )
+        self.parser.add_argument(
+            "file", nargs="?", type=str, help="Type file or directory to process"
+        )
+        self.parser.add_argument(
+            "-default-cfg", type=str, help="system configuration file"
+        )
+        self.parser.add_argument(
+            "-model-cfg", type=str, help="model configuration file"
+        )
+        self.parser.add_argument(
+            "-model-specific-cfg", type=str, help="model-specific configuration file"
+        )
         self.arg_value_dict = dict()
 
         cmd_args, bool_cmd_args = self.config_visitor.generate_cmd_args()
@@ -67,8 +76,12 @@ class BaseCmdParser(CmdParser):
 
         # https://stackoverflow.com/questions/15008758/parsing-boolean-values-with-argparse
         for bool_arg in bool_cmd_args:
-            self.parser.add_argument("-{}".format(bool_arg), dest="{}".format(bool_arg),
-                                     action="store_true", default=False)
+            self.parser.add_argument(
+                "-{}".format(bool_arg),
+                dest="{}".format(bool_arg),
+                action="store_true",
+                default=False,
+            )
         self.file = ""
 
     def get_config(self) -> Configuration:
@@ -79,15 +92,21 @@ class BaseCmdParser(CmdParser):
         for arg_name in self.config_visitor.section_argument_dict[underlying_solver]:
             if arg_name in self.arg_value_dict:
                 # assume all arguments in the solver section are string types
-                common_section.arguments[arg_name] = "\"{}\"".format(self.arg_value_dict[arg_name])
+                common_section.arguments[arg_name] = '"{}"'.format(
+                    self.arg_value_dict[arg_name]
+                )
                 del self.arg_value_dict[arg_name]
 
-        for arg_name in self.config_visitor.section_boolean_argument_dict[underlying_solver]:
+        for arg_name in self.config_visitor.section_boolean_argument_dict[
+            underlying_solver
+        ]:
             if arg_name in self.arg_value_dict:
                 # assume all arguments in the solver section are string types
                 # if cmd is set to default (i.e., false), follow the configuration file
                 if self.arg_value_dict[arg_name] != "false":
-                    common_section.arguments[arg_name] = "\"{}\"".format(self.arg_value_dict[arg_name])
+                    common_section.arguments[arg_name] = '"{}"'.format(
+                        self.arg_value_dict[arg_name]
+                    )
                 del self.arg_value_dict[arg_name]
 
     def parse(self):
@@ -96,17 +115,25 @@ class BaseCmdParser(CmdParser):
             raise ValueError("should provide an STLmc model file path")
 
         if not os.path.exists(args.file):
-            raise ValueError("\"{}\" is not a valid STLmc model file path".format(args.file))
+            raise ValueError(
+                '"{}" is not a valid STLmc model file path'.format(args.file)
+            )
 
         if not os.path.isfile(args.file):
-            raise ValueError("\"{}\" is not a file (please provide an STLmc model \"file\")".format(args.file))
+            raise ValueError(
+                '"{}" is not a file (please provide an STLmc model "file")'.format(
+                    args.file
+                )
+            )
 
         if args.default_cfg is not None:
             self.config = self.config_visitor.parse_from_file(args.default_cfg)
         else:
             default = os.path.dirname(__file__)
-            self.config = self.config_visitor.parse_from_file("{}/../default.cfg".format(default))
-            
+            self.config = self.config_visitor.parse_from_file(
+                "{}/../default.cfg".format(default)
+            )
+
             dreal = self.config.get_section("dreal")
             exec = dreal.get_value("executable-path")
             exec = "{}/{}".format(default, exec)
@@ -114,20 +141,33 @@ class BaseCmdParser(CmdParser):
 
         if args.model_cfg is not None:
             if not os.path.exists(args.model_cfg):
-                raise NotSupportedError("model config \"{}\" does not exist".format(args.model_cfg))
+                raise NotSupportedError(
+                    'model config "{}" does not exist'.format(args.model_cfg)
+                )
             # model_cfg
-            self.config = self.config_visitor.parse_from_file(args.model_cfg, self.config)
+            self.config = self.config_visitor.parse_from_file(
+                args.model_cfg, self.config
+            )
         else:
-            model_cfg_name = "{}/{}.cfg".format(os.path.dirname(args.file),
-                                                os.path.basename(args.file).split(".")[0])
+            model_cfg_name = "{}/{}.cfg".format(
+                os.path.dirname(args.file), os.path.basename(args.file).split(".")[0]
+            )
             if os.path.exists(model_cfg_name):
-                self.config = self.config_visitor.parse_from_file(model_cfg_name, self.config)
+                self.config = self.config_visitor.parse_from_file(
+                    model_cfg_name, self.config
+                )
 
         if args.model_specific_cfg is not None:
             if not os.path.exists(args.model_specific_cfg):
-                raise NotSupportedError("model specific config \"{}\" does not exist".format(args.model_specific_cfg))
+                raise NotSupportedError(
+                    'model specific config "{}" does not exist'.format(
+                        args.model_specific_cfg
+                    )
+                )
             # model_specific_cfg
-            self.config = self.config_visitor.parse_from_file(args.model_specific_cfg, self.config)
+            self.config = self.config_visitor.parse_from_file(
+                args.model_specific_cfg, self.config
+            )
 
         # print(self.config)
         for key in args.__dict__:
@@ -161,7 +201,7 @@ class BaseCmdParser(CmdParser):
         underlying_solver = common_section.get_value("solver")
         valid_solver = ["yices", "z3", "dreal", "auto"]
         if underlying_solver not in valid_solver:
-            raise ValueError("\"{}\" is not a valid SMT solver".format(underlying_solver))
+            raise ValueError('"{}" is not a valid SMT solver'.format(underlying_solver))
 
         if underlying_solver != "auto":
             self.update_solver_config(underlying_solver)
@@ -174,7 +214,9 @@ class BaseCmdParser(CmdParser):
                 for missing_arg_name in missing:
                     if missing_arg_name in self.arg_value_dict:
                         section = self.config.get_section(ordered_section_name)
-                        section.arguments[missing_arg_name] = self.arg_value_dict[missing_arg_name]
+                        section.arguments[missing_arg_name] = self.arg_value_dict[
+                            missing_arg_name
+                        ]
                         added.add(missing_arg_name)
 
                 missing.difference_update(added)
@@ -185,16 +227,28 @@ class BaseCmdParser(CmdParser):
         missing_dict = self.config_visitor.get_missing_arguments(self.config)
         for section_name in missing_dict:
             if section_name == underlying_solver:
-                raise IllegalArgumentError("should give the following arguments in order to run:\n  {}".format(
-                    ",".join(missing_dict[section_name])))
-            print("warning: a section \"{}\" has missing arguments ({})".format(section_name,
-                                                                                ",".join(missing_dict[section_name])))
+                raise IllegalArgumentError(
+                    "should give the following arguments in order to run:\n  {}".format(
+                        ",".join(missing_dict[section_name])
+                    )
+                )
+            print(
+                'warning: a section "{}" has missing arguments ({})'.format(
+                    section_name, ",".join(missing_dict[section_name])
+                )
+            )
         self.config.check_mandatory()
 
 
 class BaseRunner(Runner):
-    def run(self, config_parser: ConfigVisitor, model_parser: ModelVisitor,
-            cmd_parser: CmdParser, logger: Logger, printer: Printer):
+    def run(
+        self,
+        config_parser: ConfigVisitor,
+        model_parser: ModelVisitor,
+        cmd_parser: CmdParser,
+        logger: Logger,
+        printer: Printer,
+    ):
         try:
             sys.setrecursionlimit(1000000)
 
@@ -226,9 +280,12 @@ class BaseRunner(Runner):
                 if len(f_labels) > 1:
                     for f_label in f_labels:
                         if f_label == "all":
-                            raise NotSupportedError("\"all\" and other labels \"{}\" cannot be used together "
-                                                    "(set only \"all\" or set labels without \"all\")"
-                                                    .format(" , ".join(f_labels)))
+                            raise NotSupportedError(
+                                '"all" and other labels "{}" cannot be used together '
+                                '(set only "all" or set labels without "all")'.format(
+                                    " , ".join(f_labels)
+                                )
+                            )
                 elif len(f_labels) == 1:
                     if f_labels[0] == "all":
                         f_labels = list()
@@ -286,9 +343,14 @@ class BaseRunner(Runner):
                 printer.print_verbose("> threshold : {}".format(delta))
 
                 time_start = time.time()
-                algorithm.set_debug("{}_{}_{}".format(os.path.basename(file_name), label, underlying_solver))
-                final_result, total_time, finished_bound, assn_dict = algorithm.run(model, goal, PD, config,
-                                                                                    solver, logger, printer)
+                algorithm.set_debug(
+                    "{}_{}_{}".format(
+                        os.path.basename(file_name), label, underlying_solver
+                    )
+                )
+                final_result, total_time, finished_bound, assn_dict = algorithm.run(
+                    model, goal, PD, config, solver, logger, printer
+                )
                 time_end = time.time()
                 total_time = time_end - time_start
 
@@ -298,21 +360,35 @@ class BaseRunner(Runner):
                 if final_result == "False":
                     result_bound_string = "at bound {}".format(finished_bound)
                 printer.print_normal_dark(
-                    "result : {} {} (time bound: {})".format(final_result, result_bound_string, time_bound))
-                printer.print_normal_dark("running time {:.5f} seconds".format(total_time))
+                    "result : {} {} (time bound: {})".format(
+                        final_result, result_bound_string, time_bound
+                    )
+                )
+                printer.print_normal_dark(
+                    "running time {:.5f} seconds".format(total_time)
+                )
                 printer.print_line()
 
                 if final_result == "False":
-                    if gen_result == "true":
-                        output_name = "{}_b{}_{}_{}".format(os.path.basename(file_name).split(".")[0], bound, label,
-                                                            underlying_solver)
+                    # A generation strategy returns a pool (a list of assignment
+                    # dicts), which is written regardless of `visualize`: that
+                    # flag controls plotting, and gating the pool on it would
+                    # discard the result of the run. The single-counterexample
+                    # path keeps its original gating.
+                    is_pool = isinstance(assn_dict, list)
+                    if gen_result == "true" or is_pool:
+                        output_name = "{}_b{}_{}_{}".format(
+                            os.path.basename(file_name).split(".")[0],
+                            bound,
+                            label,
+                            underlying_solver,
+                        )
                         import pickle
 
                         # A generation strategy returns a pool (list of assignment dicts) and
                         # writes ".counterexamples"; a single-CE run returns one dict and writes
                         # ".counterexample". A strategy may expose per-CE labels on its ce_labels
                         # attribute, appended as a tenth payload element when present.
-                        is_pool = isinstance(assn_dict, list)
                         ext = "counterexamples" if is_pool else "counterexample"
                         ce_labels = getattr(algorithm, "ce_labels", None)
                         payload = (
@@ -328,17 +404,35 @@ class BaseRunner(Runner):
                         )
                         if ce_labels is not None:
                             payload = payload + (ce_labels,)
+                        if is_pool:
+                            # Dict insertion order in the assignment dicts is
+                            # identity-derived and therefore varies between
+                            # processes, so two identical runs write pools that
+                            # differ in bytes while agreeing in content. Order
+                            # the keys before pickling, making the file a
+                            # function of the content alone and a checksum
+                            # comparison meaningful. Pool path only: upstream's
+                            # single-CE output stays byte-for-byte upstream.
+                            from ..generation.canonical import canonicalize
+
+                            payload = canonicalize(payload)
                         with open("{}.{}".format(output_name, ext), "wb") as fw:
                             pickle.dump(payload, fw)
 
-                        cfg_string = ["{", "# state variables: {}".format(
-                            " , ".join(map(lambda x: x.id, model.range_dict.keys())))]
+                        cfg_string = [
+                            "{",
+                            "# state variables: {}".format(
+                                " , ".join(map(lambda x: x.id, model.range_dict.keys()))
+                            ),
+                        ]
 
                         ff = substitution(goal.get_formula(), PD)
                         subformulas, formula_id_dict = vis_sub_formula(ff)
                         rob_string = list()
                         for f in subformulas:
-                            rob_string.append("# {}_{} ---> {}".format(label, formula_id_dict[f], f))
+                            rob_string.append(
+                                "# {}_{} ---> {}".format(label, formula_id_dict[f], f)
+                            )
 
                         rob_string = sorted(rob_string)
                         cfg_string.extend(rob_string)
@@ -351,7 +445,11 @@ class BaseRunner(Runner):
                         f = open("{}.cfg".format(output_name), "w")
                         f.write("\n".join(cfg_string))
                         f.close()
-                        print("generate {}.{} and {}.cfg".format(output_name, ext, output_name))
+                        print(
+                            "generate {}.{} and {}.cfg".format(
+                                output_name, ext, output_name
+                            )
+                        )
         except SyntaxError as e:
             print("syntax error: {}".format(e))
         except Exception as e:
