@@ -36,6 +36,11 @@ class Encoding:
     """
 
     consts: Formula
+    #: ``consts`` WITHOUT the boolean-abstraction definitions: the propositional
+    #: and arithmetic skeleton, with every ODE / forall_t term still hidden
+    #: behind its abstraction Bool, so z3 can solve it even for a nonlinear
+    #: model. Required by the two-step pivot.
+    skeleton: Formula
     boolean_abstract: Dict
     bound: int
     range_dict: Dict
@@ -90,9 +95,11 @@ class Encoder:
         else:
             contradiction = BoolVal("True")
 
-        consts = And([model_const, contradiction, stl_const, ba_consts])
+        skeleton = And([model_const, contradiction, stl_const])
+        consts = And([skeleton, ba_consts])
         return Encoding(
             consts=consts,
+            skeleton=skeleton,
             boolean_abstract=boolean_abstract,
             bound=bound,
             range_dict=self.model.range_dict,
