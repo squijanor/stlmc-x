@@ -19,13 +19,13 @@ import pytest
 # are the same and this is a no-op; without it, an installed upstream copy would
 # shadow the fork and the generation package would not exist at all.
 _SRC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
-if os.path.isdir(os.path.join(_SRC, "../tests/stlmc", "generation")):
+if os.path.isdir(os.path.join(_SRC, "stlmc", "generation")):
     sys.path.insert(0, _SRC)
 
 import stlmc.cli.mc  # noqa: E402,F401  -- import-order shim, see module docstring
 
 from stlmc.constraints.constraints import (
-    And, BoolVal, Constant, Geq, Gt, Leq, Lt, Or, Real, RealVal, Variable,
+    And, BoolVal, Constant, Geq, Gt, Leq, Lt, Real, RealVal, Variable,
 )
 from stlmc.generation.oracle import SAT, UNKNOWN, UNSAT
 

@@ -9,14 +9,13 @@ particular benchmark happens to exercise them.
 
 from fractions import Fraction
 
-import pytest
 
 from stlmc.constraints.constraints import BoolVal, Real, RealVal
 from stlmc.generation.box import (
     _DEEP, _BOUNDARY, _DOMAIN, _Theta, _block_box, _merge_markers, _too_close,
     _value_of, _verdict, RegionBoxDiscovery,
 )
-from stlmc.generation.oracle import SAT, UNKNOWN, UNSAT
+from stlmc.generation.oracle import UNKNOWN
 
 from conftest import FakeOracle, beyond, covers, probe_at
 
@@ -415,3 +414,84 @@ class TestHarvestLattice:
         oracle = FakeOracle({x: (Fraction(0), Fraction(10)),
                              y: (Fraction(0), Fraction(10))})
         assert alg._harvest_lattice(oracle, box, theta, 8, 200) == ([], 0, 0)
+
+
+# ====================================================== the shared procedure
+
+class TestGrowBoxUnderEitherOracle:
+    """_grow_box is one procedure for an exact and a partial oracle.
+
+    The end-to-end tests exercise it against an exact backend; these exercise
+    the partial instantiation, which no real backend is needed to reach: the
+    oracle's tolerance and its undecided answers are what distinguish the two,
+    and both are properties of the oracle rather than of the dynamics.
+    """
+
+    @staticmethod
+    def _encoding(box_vars):
+        class _Encoding:
+            range_dict = {Real(v.id[:-4]): (True, "0", "10", True) for v in box_vars}
+            bound = 1
+        return _Encoding()
+
+    @staticmethod
+    def _pivot(**values):
+        return assn(**values)
+
+    def _grow(self, oracle, theta, budget=4, iters=20):
+        alg = RegionBoxDiscovery()
+        alg._config = None
+        pivot = self._pivot(x_0_0=5)
+        return alg._grow_box(oracle, pivot, self._encoding([Real("x_0_0")]),
+                             theta, iters, 1, budget, _SilentPrinter())
+
+    def test_a_partial_oracle_yields_a_labeled_box(self, x):
+        oracle = FakeOracle({x: (Fraction(4), Fraction(6))},
+                            tolerance=Fraction(1, 1000))
+        witnesses, labels, box = self._grow(oracle, _Theta(Fraction(1, 4)))
+        assert witnesses and len(witnesses) == len(labels)
+        assert set(labels) <= {_DEEP, _BOUNDARY, _DOMAIN}
+        lo, hi = box[x]
+        assert Fraction(4) <= lo <= Fraction(5) <= hi <= Fraction(6)
+
+    def test_an_exact_oracle_locates_a_tighter_frontier(self, x):
+        """Precision follows the oracle: theta/2**iters against theta/8."""
+        theta = _Theta(Fraction(1, 4))
+        exact = FakeOracle({x: (Fraction(4), Fraction(6))}, tolerance=Fraction(0))
+        exact.is_exact = True
+        partial = FakeOracle({x: (Fraction(4), Fraction(6))},
+                             tolerance=Fraction(1, 1000))
+        _, _, box_exact = self._grow(exact, theta, iters=12)
+        _, _, box_partial = self._grow(partial, theta)
+        assert abs(box_exact[x][1] - 6) <= abs(box_partial[x][1] - 6)
+
+    def test_undecided_probes_do_not_produce_a_wrong_box(self, x):
+        """Whatever the oracle refuses to decide, the box stays falsifying."""
+        oracle = FakeOracle({x: (Fraction(4), Fraction(6))},
+                            undecided=beyond(x, Fraction(11, 2)),
+                            tolerance=Fraction(1, 1000))
+        witnesses, labels, box = self._grow(oracle, _Theta(Fraction(1, 4)))
+        lo, hi = box[x]
+        assert Fraction(4) <= lo and hi <= Fraction(6), (
+            "an undecided probe must cost extent, never correctness")
+        for witness in witnesses:
+            value = _value_of(witness, x)
+            assert Fraction(4) <= value <= Fraction(6)
+
+    def test_witnesses_are_theta_separated_under_a_partial_oracle(self, x):
+        theta = _Theta(Fraction(1, 4))
+        oracle = FakeOracle({x: (Fraction(4), Fraction(6))},
+                            tolerance=Fraction(1, 1000))
+        witnesses, labels, _ = self._grow(oracle, theta, budget=8)
+        deep = sorted(_value_of(w, x)
+                      for w, label in zip(witnesses, labels) if label == _DEEP)
+        gaps = [b - a for a, b in zip(deep, deep[1:])]
+        assert all(g >= Fraction(1, 4) for g in gaps), gaps
+
+
+class _SilentPrinter:
+    def print_normal(self, *_a, **_k):
+        pass
+
+    def print_verbose(self, *_a, **_k):
+        pass

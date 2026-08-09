@@ -66,7 +66,6 @@ from ..constraints.constraints import (
     Neq,
     Forall,
     Implies,
-    Or,
     Bool,
     Not,
     And,
@@ -84,7 +83,7 @@ from ..constraints.constraints import (
 )
 from ..objects.algorithm import Algorithm
 from .encode import Encoder
-from .oracle import (SAT, UNSAT, UNKNOWN, GrowthOracle, Z3IncrementalOracle,
+from .oracle import (SAT, UNSAT, UNKNOWN, Z3IncrementalOracle,
                      make_oracle)
 from .pathenum import _gen_depths, _gen_int, _resolve_seed, _z3_logic
 
