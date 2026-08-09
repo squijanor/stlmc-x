@@ -33,12 +33,15 @@ root ``stlmc``.
 from __future__ import annotations
 
 import abc
+import os
+from fractions import Fraction
 from typing import Dict, List, Tuple
 
 import z3
 
 from ..solver.z3 import z3Obj, Z3Assignment
 from ..constraints.constraints import (
+    RealVal,
     And,
     Constant,
     Formula,
@@ -84,6 +87,21 @@ class GrowthOracle(abc.ABC):
     @abc.abstractmethod
     def check(self) -> str: ...
 
+    #: False for delta-decision backends: verdicts are only accurate to
+    #: :attr:`tolerance`, and a returned model is a delta-sat interval midpoint
+    #: rather than a certified satisfying assignment.
+    is_exact: bool = True
+
+    @property
+    def tolerance(self) -> Fraction:
+        """Finest meaningful resolution for a frontier on this backend."""
+        return Fraction(0)
+
+    def rv(self, f: Fraction) -> RealVal:
+        """Render an exact rational as a constant this backend can parse.
+        Default is the exact rational string, which z3 parses natively."""
+        return RealVal(str(f))
+
     @abc.abstractmethod
     def model(self) -> Dict[Variable, Constant]: ...
 
@@ -104,10 +122,14 @@ class GrowthOracle(abc.ABC):
 class Z3IncrementalOracle(GrowthOracle):
     """Raw ``z3.Solver`` with native push/pop for linear models."""
 
-    def __init__(self, logic: str = "QF_LRA", seed: int | None = None) -> None:
+    def __init__(self, logic: str = "QF_LRA", seed: int | None = None,
+                 general: bool = False) -> None:
         # z3 logic name ("QF_LRA" / "QF_NRA"). SolverFor enables the incremental
-        # theory solver for that logic.
-        self._solver = z3.SolverFor(logic)
+        # theory solver for that logic, but it also skips most preprocessing --
+        # which is fine for the arithmetic-heavy growth queries and very bad for
+        # the two-step skeleton, which is mostly Boolean structure. general=True
+        # asks for the default solver (full preprocessing, adaptive tactics).
+        self._solver = z3.Solver() if general else z3.SolverFor(logic)
         if seed is not None:
             self._solver.set("random_seed", int(seed))
         self._sat_seen = False
@@ -139,6 +161,34 @@ class Z3IncrementalOracle(GrowthOracle):
 # =========================================================================== #
 #  dReal backend (nonlinear, stateless)
 # =========================================================================== #
+def _exact_decimal(f: Fraction) -> str:
+    """Finite decimal expansion of ``f``, or raise.
+
+    Exact iff the denominator is 2^a * 5^b. On the dReal path this always holds:
+    values arrive from DrealAssignment already formatted as decimals, theta comes
+    from config as a decimal, and bisection only multiplies a denominator by 2.
+    The raise exists so a future change that breaks the invariant fails loudly
+    instead of rounding silently."""
+    d, twos, fives = f.denominator, 0, 0
+    while d % 2 == 0:
+        d //= 2
+        twos += 1
+    while d % 5 == 0:
+        d //= 5
+        fives += 1
+    if d != 1:
+        raise ValueError(
+            "no finite decimal expansion for {}; dReal's SMT2 parser has no p/q "
+            "rational literal".format(f))
+    scale = max(twos, fives)
+    if scale == 0:
+        return str(f.numerator)
+    scaled = f.numerator * 10 ** scale // f.denominator
+    sign = "-" if scaled < 0 else ""
+    digits = str(abs(scaled)).rjust(scale + 1, "0")
+    return "{}{}.{}".format(sign, digits[:-scale], digits[-scale:])
+
+
 class DrealReSolveOracle(GrowthOracle):
     """Stateless push/pop emulation over the wrapped ``dRealSolver``.
 
@@ -185,6 +235,24 @@ class DrealReSolveOracle(GrowthOracle):
             raise RuntimeError("model() called without a preceding SAT check()")
         return self._last_model
 
+    is_exact = False
+    timeouts = 0
+    _smt2_seq = 0
+
+    @property
+    def tolerance(self) -> Fraction:
+        """dReal's delta precision: no frontier is meaningful below it."""
+        try:
+            return Fraction(self._config.get_section("dreal").get_value("precision"))
+        except Exception:
+            return Fraction("0.001")
+
+    def rv(self, f: Fraction) -> RealVal:
+        # dReal3's SMT2 parser has no p/q literal: str(Fraction("3.95")) is
+        # "79/20", which is emitted verbatim, fails to parse, exits 1, and is
+        # reported by _drealcheckSat as "Unknown".
+        return RealVal(_exact_decimal(f))
+
     def _solve_once(self, consts: Formula):
         """Solve ``consts`` with a fresh ``dRealSolver`` configured from the
         run's [dreal] section. Returns ``(result_str, assignment_or_None)`` in
@@ -199,9 +267,85 @@ class DrealReSolveOracle(GrowthOracle):
             solver.append_logger(self._logger)
         if self._time_bound is not None:
             solver.set_time_bound(self._time_bound)
-        result, _size = solver.solve(consts, None, None)
-        model = solver.make_assignment().get_assignments() if result == "False" else None
+        budget = self._query_budget()
+        if budget is None:
+            result, _size = solver.solve(consts, None, None)
+            model = (solver.make_assignment().get_assignments()
+                     if result == "False" else None)
+            return result, model
+
+        # Budgeted solve. Uses dRealSolver.process(), which hands back the Popen
+        # (so it can be killed) and classifies on returncode rather than by
+        # string-matching the model text. Without a budget an undecidable probe
+        # hangs the whole run: upstream's only timeout is 1e8 seconds.
+        import queue as _q
+        import shutil as _sh
+        import threading as _th
+
+        # process() writes its SMT2 under ./dreal_log/ and NEVER removes it.
+        # Upstream's sync path removes the file; the parallel path keeps it
+        # sized for a handful of calls per run. kappa_box issues thousands, so
+        # without cleanup this grows without bound (tens of thousands of files
+        # in one session). Give each call its own subdirectory and drop it after.
+        # [gen] keep-smt2 = 1 retains them for diagnosis.
+        DrealReSolveOracle._smt2_seq += 1
+        token = "kbox_{}_{}".format(os.getpid(), DrealReSolveOracle._smt2_seq)
+        solver.set_file_name(token)
+        try:
+            keep = str(self._config.get_section("gen").get_value("keep-smt2")) == "1"
+        except Exception:
+            keep = False
+
+        def _drop():
+            if not keep:
+                _sh.rmtree(os.path.join("./dreal_log", token), ignore_errors=True)
+
+        main_queue: _q.Queue = _q.Queue()
+        sema = _th.Semaphore(0)
+        proc = solver.process(main_queue, sema, consts)
+        try:
+            msg = main_queue.get(timeout=budget)
+            # base commit puts (result, assignment, id(proc)); later upstream
+            # revisions append elapsed and an error message.
+            result, assignment = msg[0], msg[1]
+        except _q.Empty:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            self.timeouts += 1
+            _drop()
+            return "Unknown", None
+        model = assignment.get_assignments() if result == "False" else None
+        _drop()
         return result, model
+
+    def set_budget(self, seconds):
+        """Override the per-call budget (None = unbudgeted) until reset."""
+        self._budget_override = seconds
+
+    #: Default seconds per solver call. Finite deliberately: dReal can fail to
+    #: terminate on a single probe, and STLMC's only timeout is asyncio's 1e8 s,
+    #: so an unbounded default leaves a run with no way to make progress.
+    #: Set [gen] query-timeout = 0 to opt out.
+    DEFAULT_QUERY_TIMEOUT = 60.0
+
+    def _query_budget(self):
+        """Seconds allowed per solver call.
+
+        ``[gen] query-timeout`` overrides; 0 / off / none disables the budget."""
+        ov = getattr(self, "_budget_override", "unset")
+        if ov != "unset":
+            return ov
+        try:
+            sec = self._config.get_section("gen").get_value("query-timeout")
+        except Exception:
+            sec = None
+        if sec in (None, ""):
+            return self.DEFAULT_QUERY_TIMEOUT
+        if str(sec).strip() in ("0", "off", "none"):
+            return None
+        return float(sec)
 
 
 # =========================================================================== #
