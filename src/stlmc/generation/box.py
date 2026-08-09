@@ -90,13 +90,8 @@ from .pathenum import _gen_depths, _gen_int, _resolve_seed, _z3_logic
 
 _MODE_RE = re.compile(r"^currentMode_(\d+)$")
 
-# Bound the coordinate-descent passes and the steps per face; both are safety
-# nets -- growth terminates naturally once faces reach the region boundary.
-_MAX_PASSES = 16
-_MAX_STEPS = 10000
-
-# Frontier bisection steps when [gen] bisect-iters is not set; the located
-# frontier is within theta * 2**-_BISECT_ITERS of the true crossing.
+# Face-search precision on an exact oracle when [gen] bisect-iters is not set:
+# the located frontier is within theta * 2**-_BISECT_ITERS of the true crossing.
 _BISECT_ITERS = 20
 
 # Default for [gen] pivot-timeout, which bounds ONE solver call inside the pivot
@@ -289,40 +284,6 @@ def _ic_ranges(
     for state_var, bounds in range_dict.items():
         by_id["{}_0_0".format(state_var.id)] = (_frac(bounds[1]), _frac(bounds[2]))
     return {var: by_id[var.id] for var in box if var.id in by_id}
-
-
-def _point_witness(
-    oracle: GrowthOracle, var: Variable, others: Formula, value: Fraction
-) -> Optional[Dict[Variable, Constant]]:
-    """A falsifying assignment with ``var == value`` inside ``others``, or None
-    if none exists. Leaves the oracle stack unchanged."""
-    oracle.push()
-    try:
-        oracle.assert_(And([others, Eq(var, oracle.rv(value))]))
-        return oracle.model() if oracle.check() == SAT else None
-    finally:
-        oracle.pop()
-
-
-def _bisect_frontier(
-    oracle: GrowthOracle,
-    var: Variable,
-    others: Formula,
-    sat: Fraction,
-    unsat: Fraction,
-    iters: int,
-) -> Fraction:
-    """Locate the falsifying frontier between ``sat`` (falsifying) and ``unsat``
-    (non-falsifying) by bisection; return the falsifying-side bound after
-    ``iters`` steps. Direction-agnostic: ``sat`` and ``unsat`` may be in either
-    order."""
-    for _ in range(iters):
-        mid = (sat + unsat) / 2
-        if oracle.check_with(And([others, Eq(var, oracle.rv(mid))])) == SAT:
-            sat = mid
-        else:
-            unsat = mid
-    return sat
 
 
 def _block_box(bounds: Dict[Variable, Tuple[Fraction, Fraction]], rv=_rv) -> Formula:
@@ -665,67 +626,6 @@ class RegionBoxDiscovery(Algorithm):
         self._last_pivot_verdict = v
         return None, None, None
 
-    def _label_faces(
-        self,
-        oracle: GrowthOracle,
-        box: Dict[Variable, List[Fraction]],
-        ranges: Dict[Variable, Tuple[Fraction, Fraction]],
-        theta: "_Theta",
-        iters: int,
-        printer,
-    ) -> Tuple[List[Dict[Variable, Constant]], List[str]]:
-        """One marker witness per face of the converged box.
-
-        For each ``(var, direction)`` face at its final bound ``b``: if the
-        falsifying set reaches the declared range edge, emit a ``domain`` marker
-        there; otherwise bisect the theta-gap between ``b`` and the first
-        non-falsifying point and emit a ``boundary`` marker at the frontier.
-        """
-        markers: List[Dict[Variable, Constant]] = []
-        labels: List[str] = []
-        for var in box:
-            th = theta.of(var)
-            lo_dom, hi_dom = ranges.get(var, (None, None))
-            others = _box_of(box, var, oracle.rv)
-            for direction in (+1, -1):
-                b = box[var][1] if direction > 0 else box[var][0]
-                wall = hi_dom if direction > 0 else lo_dom
-
-                # The falsifying set reaches the declared edge: the observable
-                # extent is the domain wall, not a falsifying frontier.
-                if wall is not None:
-                    at_wall = _point_witness(oracle, var, others, wall)
-                    if at_wall is not None:
-                        markers.append(at_wall)
-                        labels.append(_DOMAIN)
-                        printer.print_verbose(
-                            "[kappa_box] face {}{}: domain".format(
-                                var.id, "+" if direction > 0 else "-"
-                            )
-                        )
-                        continue
-
-                # Frontier is strictly interior. The first non-falsifying point
-                # is b + direction*theta (growth stopped there), clamped to the
-                # wall when the wall is nearer.
-                unsat = b + (th if direction > 0 else -th)
-                if wall is not None:
-                    unsat = min(unsat, wall) if direction > 0 else max(unsat, wall)
-                if oracle.check_with(And([others, Eq(var, oracle.rv(unsat))])) == SAT:
-                    # No non-falsifying point within reach; nothing to locate.
-                    continue
-                frontier = _bisect_frontier(oracle, var, others, b, unsat, iters)
-                at_frontier = _point_witness(oracle, var, others, frontier)
-                if at_frontier is not None:
-                    markers.append(at_frontier)
-                    labels.append(_BOUNDARY)
-                    printer.print_verbose(
-                        "[kappa_box] face {}{}: boundary at {}".format(
-                            var.id, "+" if direction > 0 else "-", frontier
-                        )
-                    )
-        return markers, labels
-
     def _window_witness(self, oracle, var, others, centre, half):
         """A falsifying model with ``var`` within ``half`` of ``centre``.
 
@@ -912,22 +812,27 @@ class RegionBoxDiscovery(Algorithm):
                 break
         return out, requested, undecided
 
-    def _grow_box_delta(self, oracle, pivot, encoding, theta: "_Theta", depth,
-                        budget, printer):
-        """Growth and labeling for a delta-decision backend.
+    def _grow_box(self, oracle, pivot, encoding, theta: "_Theta", iters, depth,
+                  budget, printer):
+        """Grow, label and sample one box around ``pivot``.
 
-        Per face: one domain probe plus a logarithmic search for the bound, at a
-        tolerance capped by the solver's delta. Witnesses are then harvested to a
-        budget rather than being a side effect of theta-stepping."""
+        One procedure for both kinds of oracle. Per face, a domain probe and a
+        logarithmic search for the bound; then a lattice of witnesses over the
+        converged box. What the oracle changes is the precision: the search runs
+        to ``theta / 2**iters`` on an exact oracle and to ``theta / 8`` on a
+        partial one, in both cases floored by the oracle's own tolerance, since
+        no query distinguishes points closer than that."""
         ic = _ic_pivots(pivot, encoding.range_dict)
         if not ic:
             raise RuntimeError("no initial-condition variables (<name>_0_0) found")
         box = {v: [p, p] for v, p in ic.items()}
         ranges = _ic_ranges(box, encoding.range_dict)
+        exact = getattr(oracle, "is_exact", True)
+
         def tol_of(v):
-            """Face tolerance for one axis: theta/8, floored by the backend's
-            own resolution. Per axis, because theta may be."""
-            return max(oracle.tolerance, theta.of(v) / 8)
+            """Face precision for one axis, floored by the oracle's tolerance."""
+            target = theta.of(v) / (2 ** iters) if exact else theta.of(v) / 8
+            return max(oracle.tolerance, target)
         witnesses, labels = [pivot], [_DEEP]
         markers, marker_labels, calls, unresolved = [], [], 0, False
 
@@ -948,7 +853,7 @@ class RegionBoxDiscovery(Algorithm):
                 else:
                     box[var][0] = bound
                 printer.print_verbose(
-                    "[kappa_box/delta] face {}{}: {} at {} ({} calls)".format(
+                    "[kappa_box] face {}{}: {} at {} ({} calls)".format(
                         var.id, "+" if direction > 0 else "-", status,
                         float(bound), c))
                 if status in ("unresolved", "partial"):
@@ -959,7 +864,7 @@ class RegionBoxDiscovery(Algorithm):
                     # emitted because no frontier was located.
                     unresolved = True
                     printer.print_normal(
-                        "[kappa_box/delta] face {}{}: {} -- frontier not bracketed "
+                        "[kappa_box] face {}{}: {} -- frontier not bracketed "
                         "within the query budget; extent {} is a LOWER BOUND{}".format(
                             var.id, "+" if direction > 0 else "-", status.upper(),
                             float(bound),
@@ -1002,7 +907,7 @@ class RegionBoxDiscovery(Algorithm):
             if undecided:
                 harvest_undecided += undecided
                 printer.print_normal(
-                    "[kappa_box/delta] harvest{}: {} of {} point(s) UNDECIDED "
+                    "[kappa_box] harvest{}: {} of {} point(s) UNDECIDED "
                     "within [gen] query-timeout -- the pool is short by that much "
                     "for a solver reason, not a geometric one".format(
                         " on {}".format(var.id) if var is not None else " (lattice)",
@@ -1026,7 +931,7 @@ class RegionBoxDiscovery(Algorithm):
                 labels.append(_DEEP)
         if collapsed:
             printer.print_verbose(
-                "[kappa_box/delta] {} harvested witness(es) landed within theta "
+                "[kappa_box] {} harvested witness(es) landed within theta "
                 "({}) of an existing witness and were dropped".format(
                     collapsed, ", ".join("{}={}".format(v.id, float(theta.of(v)))
                                          for v in box)))
@@ -1034,100 +939,11 @@ class RegionBoxDiscovery(Algorithm):
         _merge_markers(witnesses, labels, markers, marker_labels, box, tol_of,
                        printer)
         printer.print_verbose(
-            "[kappa_box/delta] box done: {} solver calls, {} witnesses{}{}".format(
+            "[kappa_box] box done: {} solver calls, {} witnesses{}{}".format(
                 calls, len(witnesses),
                 ", extent is a LOWER BOUND (undecided face)" if unresolved else "",
                 ", {} harvest point(s) undecided".format(harvest_undecided)
                 if harvest_undecided else ""))
-        return witnesses, labels, box
-
-    def _grow_box(
-        self,
-        oracle: GrowthOracle,
-        pivot: Dict[Variable, Constant],
-        encoding,
-        theta: "_Theta",
-        iters: int,
-        depth: int,
-        printer,
-    ) -> Tuple[List[Dict[Variable, Constant]], List[str], Dict[Variable, List[Fraction]]]:
-        """Grow and label one box around ``pivot`` on ``oracle`` (which already
-        carries the encoding, the blocks, and the pinned mode path). Returns the
-        box's witnesses, their labels, and the final box bounds."""
-        ic = _ic_pivots(pivot, encoding.range_dict)
-        if not ic:
-            raise RuntimeError(
-                "no initial-condition variables (<name>_0_0) found; cannot grow an IC box"
-            )
-
-        box: Dict[Variable, List[Fraction]] = {v: [p, p] for v, p in ic.items()}
-        witnesses: List[Dict[Variable, Constant]] = [pivot]
-        labels: List[str] = [_DEEP]
-        collapsed = 0
-
-        changed = True
-        passes = 0
-        while changed and passes < _MAX_PASSES:
-            changed = False
-            passes += 1
-            for var in box:
-                th = theta.of(var)
-                others = _box_of(box, var, oracle.rv)
-                for direction in (+1, -1):
-                    for _ in range(_MAX_STEPS):
-                        lo, hi = box[var]
-                        # A falsifying IC at least theta beyond the current bound,
-                        # within a theta-wide window (keeps witnesses local/spread).
-                        if direction > 0:
-                            edge = And([Geq(var, oracle.rv(hi + th)), Leq(var, oracle.rv(hi + 2 * th))])
-                        else:
-                            edge = And([Leq(var, oracle.rv(lo - th)), Geq(var, oracle.rv(lo - 2 * th))])
-
-                        oracle.push()
-                        oracle.assert_(And([others, edge]))
-                        if oracle.check() != SAT:
-                            oracle.pop()
-                            break
-                        witness = oracle.model()
-                        oracle.pop()
-
-                        # Growth alone does not deliver theta separation once
-                        # there is more than one axis: a query grown along one
-                        # leaves the others free inside the box, so its witness
-                        # can land within theta of one collected earlier. The
-                        # bound still moves -- growth is unaffected -- but the
-                        # pool keeps one witness per theta-cell.
-                        wv = _value_of(witness, var)
-                        if _too_close(witness, witnesses, box.keys(), theta.of(var)):
-                            collapsed += 1
-                        else:
-                            witnesses.append(witness)
-                            labels.append(_DEEP)
-                        if direction > 0:
-                            box[var][1] = wv
-                        else:
-                            box[var][0] = wv
-                        changed = True
-                        printer.print_verbose(
-                            "[kappa_box] depth {}: {} witness(es) (pass {})".format(
-                                depth, len(witnesses), passes
-                            )
-                        )
-
-        if collapsed:
-            printer.print_verbose(
-                "[kappa_box] {} witness(es) landed within theta of an existing "
-                "one and were dropped from the pool".format(collapsed))
-        ranges = _ic_ranges(box, encoding.range_dict)
-        markers, marker_labels = self._label_faces(
-            oracle, box, ranges, theta, iters, printer
-        )
-        # theta / 8 on the exact path: witnesses are theta apart by construction
-        # and a bisected frontier can legitimately sit close to the last one, so
-        # the merge threshold stays well under theta and catches only points the
-        # search cannot distinguish.
-        _merge_markers(witnesses, labels, markers, marker_labels, box,
-                       lambda v: theta.of(v) / 8, printer)
         return witnesses, labels, box
 
     def run(self, model, goal, prop_dict, config, solver, logger, printer):
@@ -1191,12 +1007,11 @@ class RegionBoxDiscovery(Algorithm):
             pivot_timeout = (_gen_float(config, "pivot-timeout")
                              or _DEFAULT_CANDIDATE_TIMEOUT)
             printer.print_normal(
-                "[kappa_box/delta] solver budgets: query-timeout={}s, "
-                "pivot-timeout={}s per {}, pivot-budget={}s per depth "
+                "[kappa_box] solver budgets: query-timeout={}s, "
+                "pivot-timeout={}s per candidate, pivot-budget={}s per depth "
                 "([gen] query-timeout = 0 disables)".format(
                     _gen_float(config, "query-timeout") or 60.0,
                     pivot_timeout,
-                    "candidate" if two_step else "depth",
                     _gen_float(config, "pivot-budget") or 120.0))
 
         encoder = Encoder(model, goal, prop_dict, delta, tau_max)
@@ -1250,15 +1065,10 @@ class RegionBoxDiscovery(Algorithm):
                     break
 
                 oracle.assert_(_skeleton_fix(pivot))  # pin path + Boolean skeleton
-                if getattr(oracle, "is_exact", True):
-                    witnesses, box_labels, box = self._grow_box(
-                        oracle, pivot, encoding, theta, bisect_iters, depth, printer
-                    )
-                else:
-                    witnesses, box_labels, box = self._grow_box_delta(
-                        oracle, pivot, encoding, theta, depth,
-                        _gen_int(config, "k-witness") or 8, printer
-                    )
+                witnesses, box_labels, box = self._grow_box(
+                    oracle, pivot, encoding, theta, bisect_iters, depth,
+                    _gen_int(config, "k-witness") or 8, printer
+                )
                 boxes_here += 1
                 total_boxes += 1
                 if total_boxes == 1:
