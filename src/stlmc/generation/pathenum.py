@@ -47,7 +47,7 @@ from ..constraints.constraints import (
 )
 from ..objects.algorithm import Algorithm
 from .encode import Encoder
-from .oracle import SAT, make_oracle
+from .oracle import SAT, UNKNOWN, make_oracle
 
 # Per-step mode index variable produced by the encoding: currentMode_<step>.
 _MODE_RE = re.compile(r"^currentMode_(\d+)$")
@@ -191,6 +191,7 @@ class DiscretePathEnum(Algorithm):
         encoder = Encoder(model, goal, prop_dict, delta, tau_max)
         pool: List[Dict[Variable, Constant]] = []
         block_id = 0
+        unresolved = False
 
         for depth in target_depths:
             encoding = encoder.encode_at(depth)
@@ -199,7 +200,18 @@ class DiscretePathEnum(Algorithm):
 
             found = 0
             while per_depth is None or found < per_depth:
-                if oracle.check() != SAT:
+                verdict = oracle.check()
+                if verdict != SAT:
+                    # UNSAT means the path lattice at this depth is exhausted.
+                    # UNKNOWN means the backend gave up, which is NOT evidence of
+                    # absence; collapsing the two lets an unresolved search be
+                    # reported as "no counterexample".
+                    if verdict == UNKNOWN:
+                        unresolved = True
+                        printer.print_normal(
+                            "[kappa_path] depth {}: search UNRESOLVED (backend did "
+                            "not decide) -- the path space is NOT proven "
+                            "exhausted".format(depth))
                     break
                 assn = oracle.model()
                 pool.append(assn)
@@ -214,5 +226,17 @@ class DiscretePathEnum(Algorithm):
 
             encoder.reset()
 
-        result = "False" if pool else "True"
+        # "True" claims no counterexample exists up to the bound. That is only
+        # justified when every depth was actually decided.
+        # "True" claims no counterexample exists up to the bound. That is only
+        # justified when every depth was actually decided.
+        if pool:
+            result = "False"
+        elif unresolved:
+            result = "Unknown"
+            printer.print_normal(
+                "[kappa_path] no counterexample found, but at least one depth was "
+                "unresolved: reporting Unknown, not True")
+        else:
+            result = "True"
         return result, 0.0, max_depth, pool
