@@ -49,5 +49,11 @@ stlmc-vis = "stlmc.cli.visualize:main"
 "Upstream Source"   = "https://github.com/stlmc/stlmc/"
 
 [tool.scikit-build]
-sdist.include = ["src/", "3rd_party/", "tests/"]
+sdist.include = ["src/", "3rd_party/", "tests/", "generation_tests/"]
 wheel.packages = ["src/stlmc"]
+
+[tool.pytest.ini_options]
+testpaths = ["generation_tests"]
+filterwarnings = [
+    "ignore::DeprecationWarning:bokeh.util.serialization",
+]
