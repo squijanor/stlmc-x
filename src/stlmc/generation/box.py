@@ -56,35 +56,34 @@ from __future__ import annotations
 import os
 import re
 import time as _time
+from collections import Counter as _Counter
 from fractions import Fraction
-from typing import Dict, List, Optional, Tuple
 
-from ..constraints.operations import substitution_zero2t
 from ..constraints.constraints import (
-    Sub,
-    Real,
-    Neq,
-    Forall,
-    Implies,
-    Bool,
-    Not,
     And,
+    Bool,
     BoolVal,
     Constant,
     Eq,
+    Forall,
     Formula,
     Geq,
     Gt,
+    Implies,
     Leq,
     Lt,
+    Neq,
+    Not,
     Or,
+    Real,
     RealVal,
+    Sub,
     Variable,
 )
+from ..constraints.operations import substitution_zero2t
 from ..objects.algorithm import Algorithm
 from .encode import Encoder
-from .oracle import (SAT, UNSAT, UNKNOWN, Z3IncrementalOracle,
-                     make_oracle)
+from .oracle import SAT, UNKNOWN, UNSAT, Z3IncrementalOracle, make_oracle
 from .pathenum import _gen_depths, _gen_int, _resolve_seed, _z3_logic
 
 _MODE_RE = re.compile(r"^currentMode_(\d+)$")
@@ -133,16 +132,13 @@ def _rv(f: Fraction) -> RealVal:
     return RealVal(str(f))
 
 
-def _value_of(assn: Dict[Variable, Constant], var: Variable) -> Fraction:
+def _value_of(assn: dict[Variable, Constant], var: Variable) -> Fraction:
     """Value of ``var`` (matched by id) in an assignment, as a Fraction."""
     for v, c in assn.items():
         if v.id == var.id:
             return _frac(c.value)
     raise KeyError(var.id)
 
-
-
-from collections import Counter as _Counter
 
 _FA_PREFIX = "__fa_"
 
@@ -169,7 +165,7 @@ def _abstract_foralls(formula, memo=None, counter=None):
             key = (str(f.current_mode_number), str(f.start_tau),
                    str(f.end_tau), str(f.const))
             if key not in memo:
-                b = Bool("{}{}".format(_FA_PREFIX, counter[0]))
+                b = Bool(f"{_FA_PREFIX}{counter[0]}")
                 counter[0] += 1
                 memo[key] = (b, f)
             return memo[key][0]
@@ -194,13 +190,13 @@ def _abstract_foralls(formula, memo=None, counter=None):
     return out, {b: orig for (b, orig) in memo.values()}
 
 
-def _mode_fix(assn: Dict[Variable, Constant]) -> Formula:
+def _mode_fix(assn: dict[Variable, Constant]) -> Formula:
     """AND_k (currentMode_k == value) pinning the pivot's path."""
     terms = [Eq(v, c) for v, c in assn.items() if _MODE_RE.match(v.id)]
     return And(terms) if terms else BoolVal("True")
 
 
-def _skeleton_fix(assn: Dict[Variable, Constant]) -> Formula:
+def _skeleton_fix(assn: dict[Variable, Constant]) -> Formula:
     """Pin the pivot's whole propositional skeleton, not just its mode word.
 
     Psi_n is a large disjunctive structure over Boolean-abstraction variables
@@ -214,7 +210,7 @@ def _skeleton_fix(assn: Dict[Variable, Constant]) -> Formula:
     kappa_box already fixes the mode path, so fixing the rest of the skeleton it
     came from is consistent with what the box means: the IC region that
     falsifies *via this execution structure*."""
-    terms: List[Formula] = []
+    terms: list[Formula] = []
     for v, c in assn.items():
         if _MODE_RE.match(v.id):
             terms.append(Eq(v, c))
@@ -223,9 +219,9 @@ def _skeleton_fix(assn: Dict[Variable, Constant]) -> Formula:
     return And(terms) if terms else BoolVal("True")
 
 
-def _ic_pivots(assn: Dict[Variable, Constant], range_dict) -> Dict[Variable, Fraction]:
+def _ic_pivots(assn: dict[Variable, Constant], range_dict) -> dict[Variable, Fraction]:
     """Initial-condition variables (<name>_0_0) and their pivot values."""
-    ic_ids = {"{}_0_0".format(k.id) for k in range_dict}
+    ic_ids = {f"{k.id}_0_0" for k in range_dict}
     return {v: _frac(c.value) for v, c in assn.items() if v.id in ic_ids}
 
 
@@ -259,9 +255,9 @@ def _gen_str(config, key: str):
     return None
 
 
-def _box_of(box: Dict[Variable, List[Fraction]], skip: Variable, rv=_rv) -> Formula:
+def _box_of(box: dict[Variable, list[Fraction]], skip: Variable, rv=_rv) -> Formula:
     """AND over dimensions (except ``skip``) of lo <= x <= hi."""
-    terms: List[Formula] = []
+    terms: list[Formula] = []
     for var, (lo, hi) in box.items():
         if var is skip:
             continue
@@ -271,26 +267,26 @@ def _box_of(box: Dict[Variable, List[Fraction]], skip: Variable, rv=_rv) -> Form
 
 
 def _ic_ranges(
-    box: Dict[Variable, List[Fraction]], range_dict
-) -> Dict[Variable, Tuple[Fraction, Fraction]]:
+    box: dict[Variable, list[Fraction]], range_dict
+) -> dict[Variable, tuple[Fraction, Fraction]]:
     """Declared (lo, hi) for each IC variable in ``box``.
 
     ``range_dict`` maps a state Variable to ``(lo_incl, lo, hi, hi_incl)``; the
     IC variable ``<name>_0_0`` inherits the ``(lo, hi)`` of its state variable
     ``<name>``.
     """
-    by_id: Dict[str, Tuple[Fraction, Fraction]] = {}
+    by_id: dict[str, tuple[Fraction, Fraction]] = {}
     for state_var, bounds in range_dict.items():
-        by_id["{}_0_0".format(state_var.id)] = (_frac(bounds[1]), _frac(bounds[2]))
+        by_id[f"{state_var.id}_0_0"] = (_frac(bounds[1]), _frac(bounds[2]))
     return {var: by_id[var.id] for var in box if var.id in by_id}
 
 
-def _block_box(bounds: Dict[Variable, Tuple[Fraction, Fraction]], rv=_rv) -> Formula:
+def _block_box(bounds: dict[Variable, tuple[Fraction, Fraction]], rv=_rv) -> Formula:
     """Negation of a box: ``OR_i (x_i < lo_i OR x_i > hi_i)``.
 
     Asserted for later pivot searches so no subsequent pivot falls inside this
     box's region."""
-    terms: List[Formula] = []
+    terms: list[Formula] = []
     for var, (lo, hi) in bounds.items():
         terms.append(Lt(var, rv(lo)))
         terms.append(Gt(var, rv(hi)))
@@ -298,15 +294,16 @@ def _block_box(bounds: Dict[Variable, Tuple[Fraction, Fraction]], rv=_rv) -> For
 
 
 def _too_close(
-    witness: Dict[Variable, Constant],
-    pool: List[Dict[Variable, Constant]],
+    witness: dict[Variable, Constant],
+    pool: list[dict[Variable, Constant]],
     ic_vars,
     thin: Fraction,
 ) -> bool:
     """True if ``witness`` lies within ``thin`` of some pooled witness on every
     initial-condition axis (an L-infinity ball of radius ``thin``)."""
     for other in pool:
-        if all(abs(_value_of(witness, v) - _value_of(other, v)) < thin for v in ic_vars):
+        if all(abs(_value_of(witness, v) - _value_of(other, v)) < thin
+               for v in ic_vars):
             return True
     return False
 
@@ -326,16 +323,16 @@ class _Theta:
     for an axis whose range is undeclared or degenerate.
     """
 
-    def __init__(self, absolute: Fraction, relative: Optional[Fraction] = None,
+    def __init__(self, absolute: Fraction, relative: Fraction | None = None,
                  range_dict=None) -> None:
         self.absolute = absolute
         self.relative = relative
-        self._by_id: Dict[str, Fraction] = {}
+        self._by_id: dict[str, Fraction] = {}
         if relative is not None and range_dict is not None:
             for state_var, bounds in range_dict.items():
                 width = _frac(bounds[2]) - _frac(bounds[1])
                 if width > 0:
-                    self._by_id["{}_0_0".format(state_var.id)] = relative * width
+                    self._by_id[f"{state_var.id}_0_0"] = relative * width
 
     def of(self, var) -> Fraction:
         """theta for one IC variable."""
@@ -343,12 +340,12 @@ class _Theta:
 
     def describe(self) -> str:
         if not self._by_id:
-            return "theta={} (absolute, every axis)".format(float(self.absolute))
+            return f"theta={float(self.absolute)} (absolute, every axis)"
         per_axis = ", ".join(
-            "{}={}".format(vid, float(value))
+            f"{vid}={float(value)}"
             for vid, value in sorted(self._by_id.items()))
-        return "theta={} x declared range -> {} (fallback {})".format(
-            float(self.relative), per_axis, float(self.absolute))
+        return (f"theta={float(self.relative)} x declared range -> {per_axis}"
+                f" (fallback {float(self.absolute)})")
 
 
 def _verdict(pool, any_unresolved, visited, max_depth):
@@ -411,7 +408,7 @@ def _merge_markers(witnesses, labels, markers, marker_labels, ic_vars, tol,
         printer.print_verbose(
             "[kappa_box] {} marker(s) coincided with an existing witness "
             "(within {}) and were merged into it".format(
-                merged, ", ".join("{}={}".format(v.id, float(tol(v)))
+                merged, ", ".join(f"{v.id}={float(tol(v))}"
                                   for v in ic_vars)))
     return merged
 
@@ -425,7 +422,7 @@ class RegionBoxDiscovery(Algorithm):
         self.debug_name = ""
         # Per-counterexample labels aligned to the returned pool; read by the
         # driver to append the optional labels element to the payload.
-        self.ce_labels: Optional[List[str]] = None
+        self.ce_labels: list[str] | None = None
 
     def set_debug(self, msg: str) -> None:
         self.debug_name = msg
@@ -451,8 +448,9 @@ class RegionBoxDiscovery(Algorithm):
         _t = _time.monotonic()
         abstracted, fa_map = _abstract_foralls(encoding.skeleton)
         self._printer.print_verbose(
-            "[diag] skeleton size={} consts size={} abstract_time={:.1f}s".format(
-                _sz(encoding.skeleton), _sz(encoding.consts), _time.monotonic() - _t))
+            f"[diag] skeleton size={_sz(encoding.skeleton)} "
+            f"consts size={_sz(encoding.consts)} "
+            f"abstract_time={_time.monotonic() - _t:.1f}s")
         z3o = Z3IncrementalOracle(logic, seed, general=True)
         z3o.assert_(abstracted)
         for block in blocks:
@@ -479,12 +477,12 @@ class RegionBoxDiscovery(Algorithm):
         n_seg = encoding.bound + 1
         timing = []
         for k in range(n_seg):
-            t_k = Real("time_{}".format(k))
+            t_k = Real(f"time_{k}")
             timing.append(Geq(t_k, RealVal("0")))
             if horizon is not None:
                 timing.append(Leq(t_k, RealVal(repr(horizon))))
-            timing.append(Eq(t_k, Sub(Real("tau_{}".format(k + 1)),
-                                      Real("tau_{}".format(k)))))
+            timing.append(Eq(t_k, Sub(Real(f"tau_{k + 1}"),
+                                      Real(f"tau_{k}"))))
         for t in timing:
             z3o.assert_(t)
 
@@ -492,8 +490,8 @@ class RegionBoxDiscovery(Algorithm):
             endpoints = And([fa.const, substitution_zero2t(fa.const)])
             z3o.assert_(Implies(b, endpoints))
         self._printer.print_verbose(
-            "[kappa_box/two-step] z3 skeleton: {} forall_t abstracted, {} timing "
-            "facts, endpoint implications on".format(len(fa_map), len(timing)))
+            f"[kappa_box/two-step] z3 skeleton: {len(fa_map)} forall_t "
+            f"abstracted, {len(timing)} timing facts, endpoint implications on")
 
         # Word rotation. z3 exhausts the forall assignments of one mode word
         # before trying another, so a rejected word can absorb the whole budget.
@@ -518,8 +516,7 @@ class RegionBoxDiscovery(Algorithm):
             _v0 = z3o.check()
             if attempt == 1:
                 self._printer.print_verbose(
-                    "[diag] first z3 check: {} in {:.1f}s".format(
-                        _v0, _time.monotonic() - _tz))
+                    f"[diag] first z3 check: {_v0} in {_time.monotonic() - _tz:.1f}s")
             if _v0 != SAT:
                 self._last_pivot_verdict = UNSAT
                 return None, None, None
@@ -586,13 +583,13 @@ class RegionBoxDiscovery(Algorithm):
                     rotated += 1
                     self._rotated_words += 1
                     printer.print_verbose(
-                        "[kappa_box/two-step] rotating off word {} after {} "
-                        "consecutive rejections".format(word, streak))
+                        f"[kappa_box/two-step] rotating off word {word} after {streak} "
+                        "consecutive rejections")
                     streak_word, streak = None, 0
 
         printer.print_normal(
-            "[kappa_box/two-step] gave up after {} candidates ({} mode word(s) "
-            "rotated off)".format(attempt, rotated))
+            f"[kappa_box/two-step] gave up after {attempt} candidates "
+            f"({rotated} mode word(s) rotated off)")
         self._last_pivot_verdict = UNKNOWN
         return None, None, None
 
@@ -602,7 +599,7 @@ class RegionBoxDiscovery(Algorithm):
         depth: int,
         logic: str,
         seed: int,
-        blocks: List[Formula],
+        blocks: list[Formula],
     ):
         """Encode at ``depth`` and return (oracle, pivot model, encoding) for a
         falsifying assignment outside every blocked region, or (None, None, None).
@@ -668,11 +665,16 @@ class RegionBoxDiscovery(Algorithm):
         detours = (Fraction(1, 4), Fraction(1, 8))
 
         def falsifying_beyond(m):
-            """Is there a falsifying IC at or beyond ``m`` (towards the wall)?"""
+            """Is there a falsifying IC at or beyond ``m`` (towards the wall)?
+
+            Counts its own solver call, so no probe can be added without being
+            accounted for."""
+            nonlocal calls
+            calls += 1
             side = Geq(var, oracle.rv(m)) if up else Leq(var, oracle.rv(m))
             return oracle.check_with(And([others, side]))
 
-        v = falsifying_beyond(wall); calls += 1
+        v = falsifying_beyond(wall)
         if v == SAT:
             return wall, "domain", calls
         # UNSAT: `wall` brackets the frontier from above. UNKNOWN: it does not,
@@ -683,11 +685,11 @@ class RegionBoxDiscovery(Algorithm):
         lo, hi = start, wall              # lo falsifying; hi not, if bracketed
         while abs(hi - lo) > tol:
             mid = (lo + hi) / 2
-            v = falsifying_beyond(mid); calls += 1
+            v = falsifying_beyond(mid)
             if v == UNKNOWN:
                 for share in detours:
                     mid = lo + (hi - lo) * share
-                    v = falsifying_beyond(mid); calls += 1
+                    v = falsifying_beyond(mid)
                     if v != UNKNOWN:
                         break
             if v == SAT:
@@ -720,7 +722,8 @@ class RegionBoxDiscovery(Algorithm):
         undecided = 0
         for i in range(n):
             p = _grid(lo + span * Fraction(2 * i + 1, 2 * n))
-            w = And([others, Geq(var, oracle.rv(p - half)), Leq(var, oracle.rv(p + half))])
+            w = And([others, Geq(var, oracle.rv(p - half)),
+                     Leq(var, oracle.rv(p + half))])
             oracle.push()
             try:
                 oracle.assert_(w)
@@ -733,7 +736,7 @@ class RegionBoxDiscovery(Algorithm):
                 oracle.pop()
         return out, n, undecided
 
-    def _harvest_lattice(self, oracle, box, theta: "_Theta", budget, cap):
+    def _harvest_lattice(self, oracle, box, theta: _Theta, budget, cap):
         """Deep witnesses on a lattice over the whole box.
 
         The per-axis sweep (:meth:`_harvest`) constrains the swept axis to a
@@ -811,7 +814,7 @@ class RegionBoxDiscovery(Algorithm):
                 break
         return out, requested, undecided
 
-    def _grow_box(self, oracle, pivot, encoding, theta: "_Theta", iters, depth,
+    def _grow_box(self, oracle, pivot, encoding, theta: _Theta, iters, depth,
                   budget, printer):
         """Grow, label and sample one box around ``pivot``.
 
@@ -909,7 +912,7 @@ class RegionBoxDiscovery(Algorithm):
                     "[kappa_box] harvest{}: {} of {} point(s) UNDECIDED "
                     "within [gen] query-timeout -- the pool is short by that much "
                     "for a solver reason, not a geometric one".format(
-                        " on {}".format(var.id) if var is not None else " (lattice)",
+                        f" on {var.id}" if var is not None else " (lattice)",
                         undecided, requested))
             # A harvest point is requested inside a window of +/- theta/2 and
             # the solver may return any falsifying model in it, so a witness can
@@ -922,7 +925,8 @@ class RegionBoxDiscovery(Algorithm):
             # markers are exempt, since their position is the information they
             # carry, and may sit closer than theta to a deep witness.
             for witness in got:
-                if any(all(abs(_value_of(witness, v) - _value_of(other, v)) < theta.of(v)
+                if any(all(abs(_value_of(witness, v) - _value_of(other, v))
+                           < theta.of(v)
                            for v in box) for other in witnesses):
                     collapsed += 1
                     continue
@@ -932,7 +936,7 @@ class RegionBoxDiscovery(Algorithm):
             printer.print_verbose(
                 "[kappa_box] {} harvested witness(es) landed within theta "
                 "({}) of an existing witness and were dropped".format(
-                    collapsed, ", ".join("{}={}".format(v.id, float(theta.of(v)))
+                    collapsed, ", ".join(f"{v.id}={float(theta.of(v))}"
                                          for v in box)))
 
         _merge_markers(witnesses, labels, markers, marker_labels, box, tol_of,
@@ -941,7 +945,7 @@ class RegionBoxDiscovery(Algorithm):
             "[kappa_box] box done: {} solver calls, {} witnesses{}{}".format(
                 calls, len(witnesses),
                 ", extent is a LOWER BOUND (undecided face)" if unresolved else "",
-                ", {} harvest point(s) undecided".format(harvest_undecided)
+                f", {harvest_undecided} harvest point(s) undecided"
                 if harvest_undecided else ""))
         return witnesses, labels, box
 
@@ -974,15 +978,16 @@ class RegionBoxDiscovery(Algorithm):
         # A per-axis theta changes witness spacing on every axis, so the
         # resolved values are printed with the run.
         if theta.relative is not None:
-            printer.print_normal("[kappa_box] {}".format(theta.describe()))
+            printer.print_normal(f"[kappa_box] {theta.describe()}")
         else:
-            printer.print_verbose("[kappa_box] {}".format(theta.describe()))
+            printer.print_verbose(f"[kappa_box] {theta.describe()}")
 
         hash_seed = os.environ.get("PYTHONHASHSEED")
         if hash_seed is None or not hash_seed.isdigit():
             printer.print_normal(
-                "warning: PYTHONHASHSEED is not fixed; constraint ordering is not pinned, "
-                "so results may vary run to run. Set PYTHONHASHSEED for reproducibility."
+                "warning: PYTHONHASHSEED is not fixed; constraint ordering "
+                "is not pinned, so results may vary run to run. Set "
+                "PYTHONHASHSEED for reproducibility."
             )
 
         self._metrics = _Counter()
@@ -996,8 +1001,8 @@ class RegionBoxDiscovery(Algorithm):
                          "two-step-pivot", "warm-start", "lattice-max"):
                 if _gen_int(config, gone) is not None:
                     printer.print_normal(
-                        "warning: [gen] {} no longer exists and is "
-                        "ignored".format(gone))
+                        f"warning: [gen] {gone} no longer exists and is "
+                        "ignored")
 
             printer.print_normal(
                 "[kappa_box] word-rotate={}".format(
@@ -1014,13 +1019,13 @@ class RegionBoxDiscovery(Algorithm):
                     _gen_float(config, "pivot-budget") or 120.0))
 
         encoder = Encoder(model, goal, prop_dict, delta, tau_max)
-        pool: List[Dict[Variable, Constant]] = []
-        labels: List[str] = []
+        pool: list[dict[Variable, Constant]] = []
+        labels: list[str] = []
         first_depth = max_depth
         total_boxes = 0
 
         for depth in target_depths:
-            blocks: List[Formula] = []  # per depth: independent region discovery
+            blocks: list[Formula] = []  # per depth: independent region discovery
             boxes_here = 0
             self._rotated_words = 0     # heuristic pruning is scoped to a depth
             while per_depth_boxes is None or boxes_here < per_depth_boxes:
@@ -1031,9 +1036,10 @@ class RegionBoxDiscovery(Algorithm):
                     if getattr(self, "_last_pivot_verdict", None) == UNKNOWN:
                         self._any_unresolved = True
                         printer.print_normal(
-                            "[kappa_box] depth {}: pivot search UNRESOLVED (solver "
-                            "budget exhausted) -- the region is NOT proven empty; "
-                            "raise [gen] pivot-timeout to search further".format(depth))
+                            f"[kappa_box] depth {depth}: pivot search "
+                            "UNRESOLVED (solver budget exhausted) -- the region "
+                            "is NOT proven empty; raise [gen] pivot-timeout to "
+                            "search further")
                     else:
                         # UNSAT: the structure space is exhausted. What that is
                         # worth depends on what was pruned -- word rotation
@@ -1042,12 +1048,12 @@ class RegionBoxDiscovery(Algorithm):
                         # none exists.
                         heuristic = []
                         if self._rotated_words:
-                            heuristic.append("{} word(s) rotated off".format(
-                                self._rotated_words))
+                            heuristic.append(
+                                f"{self._rotated_words} word(s) rotated off")
                         scope = ("no counterexample at this depth"
                                  if not blocks else
-                                 "no counterexample outside the {} box(es) already "
-                                 "found".format(boxes_here))
+                                 f"no counterexample outside the "
+                                 f"{boxes_here} box(es) already found")
                         if heuristic:
                             printer.print_normal(
                                 "[kappa_box] depth {}: structure space exhausted, "
@@ -1057,9 +1063,9 @@ class RegionBoxDiscovery(Algorithm):
                                     depth, ", ".join(heuristic)))
                         else:
                             printer.print_normal(
-                                "[kappa_box] depth {}: structure space exhausted -- "
-                                "{} (absence, established by exhaustion)".format(
-                                    depth, scope))
+                                f"[kappa_box] depth {depth}: structure space "
+                                f"exhausted -- {scope} (absence, established by "
+                                f"exhaustion)")
                     encoder.reset()
                     break
 
@@ -1100,22 +1106,16 @@ class RegionBoxDiscovery(Algorithm):
                         (self._metrics["accepted"] / self._metrics["candidates"])
                         if self._metrics["candidates"] else 0.0))
                 printer.print_verbose(
-                    "[kappa_box] depth {}: box {} here, kept {}/{}; pool {}".format(
-                        depth, boxes_here, kept, len(witnesses), len(pool)
-                    )
+                    f"[kappa_box] depth {depth}: box {boxes_here} here, "
+                    f"kept {kept}/{len(witnesses)}; pool {len(pool)}"
                 )
 
         self.ce_labels = labels
         printer.print_verbose(
-            "[kappa_box] {} box(es) over {} target depth(s), {} witnesses: "
-            "{} deep, {} boundary, {} domain".format(
-                total_boxes,
-                len(target_depths),
-                len(pool),
-                labels.count(_DEEP),
-                labels.count(_BOUNDARY),
-                labels.count(_DOMAIN),
-            )
+            f"[kappa_box] {total_boxes} box(es) over {len(target_depths)} "
+            f"target depth(s), {len(pool)} witnesses: "
+            f"{labels.count(_DEEP)} deep, {labels.count(_BOUNDARY)} boundary, "
+            f"{labels.count(_DOMAIN)} domain"
         )
 
         result, note = _verdict(pool, getattr(self, "_any_unresolved", False),
