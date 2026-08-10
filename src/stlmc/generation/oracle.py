@@ -14,6 +14,14 @@ Backends
   so push/pop are emulated by replaying an assertion stack and re-solving on
   every ``check()``.
 
+Solver-call bounds
+------------------
+Neither backend is guaranteed to return on a query, so both are bounded per call
+by ``[gen] query-timeout`` (:data:`DEFAULT_QUERY_TIMEOUT` seconds by default,
+``0`` to disable). An exceeded bound is reported as :data:`UNKNOWN`, which is
+already distinct from :data:`UNSAT` for every caller, so a bounded call costs a
+result and never turns a resource failure into a claim about the model.
+
 Verdict convention
 ------------------
 STLMC's wrapped solvers report a satisfiable query as ``"False"`` and an
@@ -58,6 +66,33 @@ UNKNOWN = "unknown"
 
 # An initial-condition box: variable -> (lower, upper) as Python floats.
 BoxBounds = Dict[Variable, Tuple[float, float]]
+
+#: Default seconds allowed for one solver call, on either backend. Finite
+#: deliberately. dReal can fail to terminate on a single probe and STLMC's only
+#: timeout is asyncio's 1e8 s; z3 on a nonlinear logic can spend an unbounded
+#: time on one query, and whether it does depends on the order the constraints
+#: were built in rather than on the query's size. An unbounded default leaves a
+#: run with no way to make progress and nothing to report.
+DEFAULT_QUERY_TIMEOUT = 60.0
+
+
+def query_timeout(config):
+    """Seconds allowed for one solver call, or None when the bound is disabled.
+
+    ``[gen] query-timeout`` overrides :data:`DEFAULT_QUERY_TIMEOUT`; ``0``,
+    ``off`` or ``none`` removes the bound. A missing or unreadable configuration
+    falls back to the default rather than to no bound, since an unbounded call is
+    the failure this exists to prevent.
+    """
+    try:
+        sec = config.get_section("gen").get_value("query-timeout")
+    except Exception:
+        sec = None
+    if sec in (None, ""):
+        return DEFAULT_QUERY_TIMEOUT
+    if str(sec).strip() in ("0", "off", "none"):
+        return None
+    return float(sec)
 
 
 # =========================================================================== #
@@ -123,7 +158,8 @@ class Z3IncrementalOracle(GrowthOracle):
     """Raw ``z3.Solver`` with native push/pop for linear models."""
 
     def __init__(self, logic: str = "QF_LRA", seed: int | None = None,
-                 general: bool = False) -> None:
+                 general: bool = False,
+                 timeout: float | None = DEFAULT_QUERY_TIMEOUT) -> None:
         # z3 logic name ("QF_LRA" / "QF_NRA"). SolverFor enables the incremental
         # theory solver for that logic, but it also skips most preprocessing --
         # which is fine for the arithmetic-heavy growth queries and very bad for
@@ -132,6 +168,15 @@ class Z3IncrementalOracle(GrowthOracle):
         self._solver = z3.Solver() if general else z3.SolverFor(logic)
         if seed is not None:
             self._solver.set("random_seed", int(seed))
+        if timeout is not None and float(timeout) > 0:
+            # z3 takes milliseconds and applies the bound to each check(). The
+            # default is carried by the constructor rather than injected by
+            # make_oracle, because callers also construct this class directly.
+            # A non-positive value removes the bound, matching what
+            # `query_timeout` reads from [gen] query-timeout = 0; note that a
+            # bound below z3's own resolution answers unknown for every query,
+            # including trivial ones.
+            self._solver.set("timeout", max(1, int(float(timeout) * 1000)))
         self._sat_seen = False
 
     def assert_(self, formula: Formula) -> None:
@@ -324,28 +369,15 @@ class DrealReSolveOracle(GrowthOracle):
         """Override the per-call budget (None = unbudgeted) until reset."""
         self._budget_override = seconds
 
-    #: Default seconds per solver call. Finite deliberately: dReal can fail to
-    #: terminate on a single probe, and STLMC's only timeout is asyncio's 1e8 s,
-    #: so an unbounded default leaves a run with no way to make progress.
-    #: Set [gen] query-timeout = 0 to opt out.
-    DEFAULT_QUERY_TIMEOUT = 60.0
-
     def _query_budget(self):
-        """Seconds allowed per solver call.
+        """Seconds allowed for one solver call, or None when unbounded.
 
-        ``[gen] query-timeout`` overrides; 0 / off / none disables the budget."""
+        A caller-supplied override wins over the configuration; otherwise this is
+        the shared ``[gen] query-timeout`` resolution."""
         ov = getattr(self, "_budget_override", "unset")
         if ov != "unset":
             return ov
-        try:
-            sec = self._config.get_section("gen").get_value("query-timeout")
-        except Exception:
-            sec = None
-        if sec in (None, ""):
-            return self.DEFAULT_QUERY_TIMEOUT
-        if str(sec).strip() in ("0", "off", "none"):
-            return None
-        return float(sec)
+        return query_timeout(self._config)
 
 
 # =========================================================================== #
@@ -364,9 +396,10 @@ def make_oracle(
 
     ``z3`` uses the native incremental solver (``logic`` and ``seed``); ``dreal``
     uses the stateless re-solve backend (``config``, ``logger``, ``time_bound``).
+    Both read their per-call bound from ``config``.
     """
     if underlying == "z3":
-        return Z3IncrementalOracle(logic, seed)
+        return Z3IncrementalOracle(logic, seed, timeout=query_timeout(config))
     if underlying == "dreal":
         return DrealReSolveOracle(config, logger, time_bound)
     raise NotImplementedError(
