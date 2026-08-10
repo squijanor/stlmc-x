@@ -53,8 +53,6 @@ for the driver to append to the payload.
 
 from __future__ import annotations
 
-import os
-import re
 import time as _time
 from collections import Counter as _Counter
 from fractions import Fraction
@@ -82,11 +80,20 @@ from ..constraints.constraints import (
 )
 from ..constraints.operations import substitution_zero2t
 from ..objects.algorithm import Algorithm
+from .common import (
+    MODE_RE,
+    gen_depths,
+    gen_float,
+    gen_frac,
+    gen_int,
+    gen_str,
+    resolve_seed,
+    scoped_verdict,
+    warn_unpinned_hashseed,
+    z3_logic,
+)
 from .encode import Encoder
 from .oracle import SAT, UNKNOWN, UNSAT, Z3IncrementalOracle, make_oracle
-from .pathenum import _gen_depths, _gen_int, _resolve_seed, _z3_logic
-
-_MODE_RE = re.compile(r"^currentMode_(\d+)$")
 
 # Face-search precision on an exact oracle when [gen] bisect-iters is not set:
 # the located frontier is within theta * 2**-_BISECT_ITERS of the true crossing.
@@ -192,7 +199,7 @@ def _abstract_foralls(formula, memo=None, counter=None):
 
 def _mode_fix(assn: dict[Variable, Constant]) -> Formula:
     """AND_k (currentMode_k == value) pinning the pivot's path."""
-    terms = [Eq(v, c) for v, c in assn.items() if _MODE_RE.match(v.id)]
+    terms = [Eq(v, c) for v, c in assn.items() if MODE_RE.match(v.id)]
     return And(terms) if terms else BoolVal("True")
 
 
@@ -212,7 +219,7 @@ def _skeleton_fix(assn: dict[Variable, Constant]) -> Formula:
     falsifies *via this execution structure*."""
     terms: list[Formula] = []
     for v, c in assn.items():
-        if _MODE_RE.match(v.id):
+        if MODE_RE.match(v.id):
             terms.append(Eq(v, c))
         elif isinstance(v, Bool):
             terms.append(v if str(c.value) == "True" else Not(v))
@@ -223,36 +230,6 @@ def _ic_pivots(assn: dict[Variable, Constant], range_dict) -> dict[Variable, Fra
     """Initial-condition variables (<name>_0_0) and their pivot values."""
     ic_ids = {f"{k.id}_0_0" for k in range_dict}
     return {v: _frac(c.value) for v, c in assn.items() if v.id in ic_ids}
-
-
-def _gen_float(config, key: str):
-    """A float [gen] value, or None when absent/empty/zero."""
-    if config is not None and config.is_section_in("gen"):
-        sec = config.get_section("gen")
-        if sec.is_argument_in(key):
-            v = sec.get_value(key)
-            if v not in (None, "", "0"):
-                return float(v)
-    return None
-
-
-def _gen_frac(config, key: str, default: str) -> Fraction:
-    if config.is_section_in("gen"):
-        section = config.get_section("gen")
-        if section.is_argument_in(key):
-            return Fraction(section.get_value(key))
-    return Fraction(default)
-
-
-def _gen_str(config, key: str):
-    """A string [gen] value, or None when absent or empty."""
-    if config is not None and config.is_section_in("gen"):
-        section = config.get_section("gen")
-        if section.is_argument_in(key):
-            value = section.get_value(key)
-            if value not in (None, ""):
-                return str(value).strip().strip('"')
-    return None
 
 
 def _box_of(box: dict[Variable, list[Fraction]], skip: Variable, rv=_rv) -> Formula:
@@ -349,27 +326,10 @@ class _Theta:
 
 
 def _verdict(pool, any_unresolved, visited, max_depth):
-    """The run's verdict, and the line explaining it (or None).
-
-    A verdict may only speak about the depths that were visited. The driver
-    prints "up to bound N" from the bound rather than from the explored depths,
-    so a run restricted with [gen] depths must not report True: absence over a
-    subset of depths is not absence up to the bound, and is reported as
-    Unknown."""
-    if pool:
-        return "False", None
-    if any_unresolved:
-        return "Unknown", ("[kappa_box] no box found, but at least one pivot "
-                           "search was unresolved: reporting Unknown, not True")
-    skipped = set(range(1, max_depth + 1)) - set(visited)
-    if skipped:
-        return "Unknown", (
-            "[kappa_box] no box found over depth(s) {}, but [gen] depths "
-            "skipped {} -- reporting Unknown, not True: absence over a subset "
-            "of depths is not absence up to the bound".format(
-                "/".join(str(d) for d in sorted(set(visited))),
-                "/".join(str(d) for d in sorted(skipped))))
-    return "True", None
+    """kappa_box's wording for the shared depth-scoping rule."""
+    return scoped_verdict(pool, any_unresolved, visited, max_depth,
+                          tag="kappa_box", nothing_found="no box found",
+                          unresolved_source="at least one pivot search")
 
 
 def _merge_markers(witnesses, labels, markers, marker_labels, ic_vars, tol,
@@ -500,13 +460,13 @@ class RegionBoxDiscovery(Algorithm):
         # would have been feasible under a later assignment, trading
         # completeness for coverage, which is why an exhausted search is not
         # reported as absence once it has fired. 0 disables.
-        rotate = _gen_int(self._config, "word-rotate")
+        rotate = gen_int(self._config, "word-rotate")
         rotate = 30 if rotate is None else rotate
         streak_word, streak = None, 0
         rotated = 0    # heuristic drops; an UNSAT verdict is then inconclusive
 
-        every = _gen_int(self._config, "log-every") or 25
-        budget = _gen_float(self._config, "pivot-budget") or 120.0
+        every = gen_int(self._config, "log-every") or 25
+        budget = gen_float(self._config, "pivot-budget") or 120.0
         deadline = _time.monotonic() + budget
         attempt = 0
         while _time.monotonic() < deadline:
@@ -524,9 +484,9 @@ class RegionBoxDiscovery(Algorithm):
             word = "".join(
                 str(int(round(float(c.value))))
                 for v, c in sorted(candidate.items(), key=lambda kv: kv[0].id)
-                if _MODE_RE.match(v.id))
+                if MODE_RE.match(v.id))
             mode_only = And([Eq(v, c) for v, c in candidate.items()
-                             if _MODE_RE.match(v.id)]) if word else BoolVal("True")
+                             if MODE_RE.match(v.id)]) if word else BoolVal("True")
 
             # Pin only what exists in the real encoding; the fresh forall_t Bools
             # do not, so their z3 truth values are replayed as the ORIGINAL
@@ -556,7 +516,7 @@ class RegionBoxDiscovery(Algorithm):
             d = make_oracle(self._underlying, logic=logic, seed=seed,
                             config=self._config, logger=self._logger,
                             time_bound=self._tau_max)
-            d.set_budget(_gen_float(self._config, "pivot-timeout")
+            d.set_budget(gen_float(self._config, "pivot-timeout")
                          or _DEFAULT_CANDIDATE_TIMEOUT)
             d.assert_(encoding.consts)
             d.assert_(pinned)
@@ -894,7 +854,7 @@ class RegionBoxDiscovery(Algorithm):
         # same thing on every axis (see _harvest_lattice). `harvest = sweep`
         # restores the per-axis sweep. In one dimension the two are identical,
         # so this changes nothing for single-variable models.
-        lattice = str(_gen_str(self._config, "harvest") or "lattice") != "sweep"
+        lattice = str(gen_str(self._config, "harvest") or "lattice") != "sweep"
         if lattice:
             sweeps = [(None, self._harvest_lattice(
                 oracle, box, theta, budget,
@@ -965,16 +925,16 @@ class RegionBoxDiscovery(Algorithm):
         self._logger = logger
         self._tau_max = common.get_value("time-bound")
 
-        logic = _z3_logic(config)
-        seed = _resolve_seed(config)
+        logic = z3_logic(config)
+        seed = resolve_seed(config)
         # theta: absolute by default, per-axis when [gen] epsilon-relative is set.
-        theta = _Theta(_gen_frac(config, "epsilon", "0.01"),
-                       _gen_frac(config, "epsilon-relative", "0") or None,
+        theta = _Theta(gen_frac(config, "epsilon", "0.01"),
+                       gen_frac(config, "epsilon-relative", "0") or None,
                        model.range_dict)
-        bisect_iters = _gen_int(config, "bisect-iters") or _BISECT_ITERS
-        per_depth_boxes = _gen_int(config, "k-ic")  # per target depth; None -> exhaust
-        thin = _gen_frac(config, "thin-ic", "0")  # 0 -> no thinning
-        target_depths = _gen_depths(config, max_depth)
+        bisect_iters = gen_int(config, "bisect-iters") or _BISECT_ITERS
+        per_depth_boxes = gen_int(config, "k-ic")  # per target depth; None -> exhaust
+        thin = gen_frac(config, "thin-ic", "0")  # 0 -> no thinning
+        target_depths = gen_depths(config, max_depth)
         # A per-axis theta changes witness spacing on every axis, so the
         # resolved values are printed with the run.
         if theta.relative is not None:
@@ -982,13 +942,7 @@ class RegionBoxDiscovery(Algorithm):
         else:
             printer.print_verbose(f"[kappa_box] {theta.describe()}")
 
-        hash_seed = os.environ.get("PYTHONHASHSEED")
-        if hash_seed is None or not hash_seed.isdigit():
-            printer.print_normal(
-                "warning: PYTHONHASHSEED is not fixed; constraint ordering "
-                "is not pinned, so results may vary run to run. Set "
-                "PYTHONHASHSEED for reproducibility."
-            )
+        warn_unpinned_hashseed(printer)
 
         self._metrics = _Counter()
         self._any_unresolved = False
@@ -999,24 +953,24 @@ class RegionBoxDiscovery(Algorithm):
             for gone in ("word-pruning", "word-check-timeout",
                          "assume-monotone-flows", "block-class",
                          "two-step-pivot", "warm-start", "lattice-max"):
-                if _gen_int(config, gone) is not None:
+                if gen_int(config, gone) is not None:
                     printer.print_normal(
                         f"warning: [gen] {gone} no longer exists and is "
                         "ignored")
 
             printer.print_normal(
                 "[kappa_box] word-rotate={}".format(
-                    30 if _gen_int(config, "word-rotate") is None
-                    else (_gen_int(config, "word-rotate") or "off")))
-            pivot_timeout = (_gen_float(config, "pivot-timeout")
+                    30 if gen_int(config, "word-rotate") is None
+                    else (gen_int(config, "word-rotate") or "off")))
+            pivot_timeout = (gen_float(config, "pivot-timeout")
                              or _DEFAULT_CANDIDATE_TIMEOUT)
             printer.print_normal(
                 "[kappa_box] solver budgets: query-timeout={}s, "
                 "pivot-timeout={}s per candidate, pivot-budget={}s per depth "
                 "([gen] query-timeout = 0 disables)".format(
-                    _gen_float(config, "query-timeout") or 60.0,
+                    gen_float(config, "query-timeout") or 60.0,
                     pivot_timeout,
-                    _gen_float(config, "pivot-budget") or 120.0))
+                    gen_float(config, "pivot-budget") or 120.0))
 
         encoder = Encoder(model, goal, prop_dict, delta, tau_max)
         pool: list[dict[Variable, Constant]] = []
@@ -1072,7 +1026,7 @@ class RegionBoxDiscovery(Algorithm):
                 oracle.assert_(_skeleton_fix(pivot))  # pin path + Boolean skeleton
                 witnesses, box_labels, box = self._grow_box(
                     oracle, pivot, encoding, theta, bisect_iters, depth,
-                    _gen_int(config, "k-witness") or 8, printer
+                    gen_int(config, "k-witness") or 8, printer
                 )
                 boxes_here += 1
                 total_boxes += 1

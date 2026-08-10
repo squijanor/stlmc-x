@@ -1,7 +1,9 @@
 """Custom counterexample generation strategies.
 
 Standalone algorithms that reuse only the STLMC falsification encoding
-(`generation.encode`) and an incremental solver (`generation.oracle`). Selected
+(`generation.encode`), an incremental solver (`generation.oracle`) and the
+driver-contract helpers in `generation.common` -- configuration reading and
+verdict scoping. They share no mechanism and do not import one another. Selected
 by the [common] ``generation`` config value and dispatched here.
 """
 

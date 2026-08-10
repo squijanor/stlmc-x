@@ -26,8 +26,6 @@ alone does not pin it.
 
 from __future__ import annotations
 
-import os
-import re
 from functools import reduce
 
 from ..constraints.constraints import (
@@ -45,21 +43,23 @@ from ..constraints.constraints import (
     Variable,
 )
 from ..objects.algorithm import Algorithm
+from .common import (
+    MODE_RE,
+    gen_depths,
+    gen_int,
+    resolve_seed,
+    warn_unpinned_hashseed,
+    z3_logic,
+)
 from .encode import Encoder
 from .oracle import SAT, UNKNOWN, make_oracle
-
-# Per-step mode index variable produced by the encoding: currentMode_<step>.
-_MODE_RE = re.compile(r"^currentMode_(\d+)$")
-
-# Config z3 logic -> the logic name the base Z3Solver passes to z3.SolverFor.
-_Z3_LOGIC = {"QF_LRA": "LRA", "QF_NRA": "NRA"}
 
 
 def _location_word(assn: dict[Variable, Constant]) -> list[tuple[Variable, Constant]]:
     """The (currentMode_k, value) pairs of an assignment, ordered by step k."""
     steps: list[tuple[int, Variable, Constant]] = []
     for var, val in assn.items():
-        m = _MODE_RE.match(var.id)
+        m = MODE_RE.match(var.id)
         if m is not None:
             steps.append((int(m.group(1)), var, val))
     steps.sort(key=lambda t: t[0])
@@ -95,60 +95,6 @@ def block_radius(assn: dict[Variable, Constant], radius: int, uid: int) -> Formu
     return And(consts)
 
 
-def _gen_int(config, key: str):
-    """Read an integer from the optional [gen] section, or None if absent."""
-    if config.is_section_in("gen"):
-        section = config.get_section("gen")
-        if section.is_argument_in(key):
-            return int(section.get_value(key))
-    return None
-
-
-def _gen_depths(config, max_depth: int) -> list[int]:
-    """Target depths: the ``[gen] depths`` list clamped to 1..max_depth, or every
-    depth 1..max_depth when absent.
-
-    The list is slash-separated (e.g. ``"8/9/10/11"``): the config grammar lexes a
-    bare number as a NUMBER token and accepts only a single VALUE token inside
-    quotes, and a VALUE may contain ``/`` -- so ``"8/9/10/11"`` is one token while
-    ``"8,9,10,11"`` does not parse. Commas are still tolerated if they get through.
-    """
-    if config.is_section_in("gen"):
-        section = config.get_section("gen")
-        if section.is_argument_in("depths"):
-            raw = str(section.get_value("depths"))
-            picked = sorted({int(tok) for tok in re.split(r"[,/]", raw) if tok.strip()})
-            return [d for d in picked if 1 <= d <= max_depth]
-    return list(range(1, max_depth + 1))
-
-
-def _z3_logic(config) -> str:
-    if config.is_section_in("z3"):
-        z3_section = config.get_section("z3")
-        if z3_section.is_argument_in("logic"):
-            return _Z3_LOGIC.get(z3_section.get_value("logic"), "LRA")
-    return "LRA"
-
-
-def _resolve_seed(config) -> int:
-    """The generation seed: -gen-seed if given (>= 0), else PYTHONHASHSEED.
-
-    Raises if neither is present, so a run is never silently non-reproducible.
-    """
-    common = config.get_section("common")
-    if common.is_argument_in("gen-seed"):
-        value = int(common.get_value("gen-seed"))
-        if value >= 0:
-            return value
-    hash_seed = os.environ.get("PYTHONHASHSEED")
-    if hash_seed is not None and hash_seed.isdigit():
-        return int(hash_seed)
-    raise ValueError(
-        "no generation seed: pass -gen-seed <n> or set PYTHONHASHSEED to a "
-        "non-negative integer"
-    )
-
-
 class DiscretePathEnum(Algorithm):
     """kappa_path: enumerate distinct paths over depths 1..N under a pool budget."""
 
@@ -165,19 +111,13 @@ class DiscretePathEnum(Algorithm):
         delta = float(common.get_value("threshold"))
         underlying = common.get_value("solver")
 
-        per_depth = _gen_int(config, "k-paths")  # per target depth; None -> exhaust
-        target_depths = _gen_depths(config, max_depth)
-        radius = _gen_int(config, "radius") or 0
-        logic = _z3_logic(config)
-        seed = _resolve_seed(config)
+        per_depth = gen_int(config, "k-paths")  # per target depth; None -> exhaust
+        target_depths = gen_depths(config, max_depth)
+        radius = gen_int(config, "radius") or 0
+        logic = z3_logic(config)
+        seed = resolve_seed(config)
 
-        hash_seed = os.environ.get("PYTHONHASHSEED")
-        if hash_seed is None or not hash_seed.isdigit():
-            printer.print_normal(
-                "warning: PYTHONHASHSEED is not fixed; constraint ordering "
-                "is not pinned, so the pool may vary run to run despite "
-                "-gen-seed. Set PYTHONHASHSEED for reproducibility."
-            )
+        warn_unpinned_hashseed(printer)
 
         # z3 uses logic/seed; dreal uses config/logger/time-bound.
         def new_oracle():
