@@ -9,15 +9,22 @@ particular benchmark happens to exercise them.
 
 from fractions import Fraction
 
+from conftest import FakeOracle, beyond, covers, probe_at
 
 from stlmc.constraints.constraints import BoolVal, Real, RealVal
 from stlmc.generation.box import (
-    _DEEP, _BOUNDARY, _DOMAIN, _Theta, _block_box, _merge_markers, _too_close,
-    _value_of, _verdict, RegionBoxDiscovery,
+    _BOUNDARY,
+    _DEEP,
+    _DOMAIN,
+    RegionBoxDiscovery,
+    _block_box,
+    _merge_markers,
+    _Theta,
+    _too_close,
+    _value_of,
+    _verdict,
 )
 from stlmc.generation.oracle import UNKNOWN
-
-from conftest import FakeOracle, beyond, covers, probe_at
 
 TRUE = BoolVal("True")
 
@@ -99,7 +106,7 @@ class TestSearchFace:
             oracle = FakeOracleFor(x, 0, 4, undecided=undecided)
             bound, status, _ = alg._search_face(
                 oracle, x, TRUE, Fraction(0), Fraction(10), Fraction(1, 100))
-            assert bound <= 4, "status={} returned a non-falsifying bound".format(status)
+            assert bound <= 4, f"status={status} returned a non-falsifying bound"
 
 
 # ================================================================== harvest
@@ -268,7 +275,7 @@ def _satisfies(formula, point):
             return value < bound
         if isinstance(node, Gt):
             return value > bound
-        raise AssertionError("unexpected node {}".format(type(node).__name__))
+        raise AssertionError(f"unexpected node {type(node).__name__}")
 
     return go(formula)
 
