@@ -29,7 +29,6 @@ from __future__ import annotations
 import os
 import re
 from functools import reduce
-from typing import Dict, List, Tuple
 
 from ..constraints.constraints import (
     Add,
@@ -56,9 +55,9 @@ _MODE_RE = re.compile(r"^currentMode_(\d+)$")
 _Z3_LOGIC = {"QF_LRA": "LRA", "QF_NRA": "NRA"}
 
 
-def _location_word(assn: Dict[Variable, Constant]) -> List[Tuple[Variable, Constant]]:
+def _location_word(assn: dict[Variable, Constant]) -> list[tuple[Variable, Constant]]:
     """The (currentMode_k, value) pairs of an assignment, ordered by step k."""
-    steps: List[Tuple[int, Variable, Constant]] = []
+    steps: list[tuple[int, Variable, Constant]] = []
     for var, val in assn.items():
         m = _MODE_RE.match(var.id)
         if m is not None:
@@ -67,7 +66,7 @@ def _location_word(assn: Dict[Variable, Constant]) -> List[Tuple[Variable, Const
     return [(var, val) for _, var, val in steps]
 
 
-def block_radius(assn: Dict[Variable, Constant], radius: int, uid: int) -> Formula:
+def block_radius(assn: dict[Variable, Constant], radius: int, uid: int) -> Formula:
     """Clause excluding every location word within Hamming distance ``radius`` of
     ``assn``'s word. ``uid`` makes the radius>=1 indicator variables unique.
 
@@ -77,16 +76,17 @@ def block_radius(assn: Dict[Variable, Constant], radius: int, uid: int) -> Formu
     word = _location_word(assn)
     if not word:
         raise RuntimeError(
-            "no currentMode_k variables in assignment; model has no discrete modes to enumerate"
+            "no currentMode_k variables in assignment; model has no discrete "
+            "modes to enumerate"
         )
 
     if radius <= 0:
         return Or([Neq(var, val) for var, val in word])
 
-    consts: List[Formula] = []
-    indicators: List[Variable] = []
+    consts: list[Formula] = []
+    indicators: list[Variable] = []
     for k, (var, val) in enumerate(word):
-        ind = Int("hb${}${}".format(uid, k))
+        ind = Int(f"hb${uid}${k}")
         indicators.append(ind)
         consts.append(Or([Eq(ind, IntVal("0")), Eq(ind, IntVal("1"))]))
         consts.append(Implies(Neq(var, val), Eq(ind, IntVal("1"))))
@@ -104,7 +104,7 @@ def _gen_int(config, key: str):
     return None
 
 
-def _gen_depths(config, max_depth: int) -> List[int]:
+def _gen_depths(config, max_depth: int) -> list[int]:
     """Target depths: the ``[gen] depths`` list clamped to 1..max_depth, or every
     depth 1..max_depth when absent.
 
@@ -144,7 +144,8 @@ def _resolve_seed(config) -> int:
     if hash_seed is not None and hash_seed.isdigit():
         return int(hash_seed)
     raise ValueError(
-        "no generation seed: pass -gen-seed <n> or set PYTHONHASHSEED to a non-negative integer"
+        "no generation seed: pass -gen-seed <n> or set PYTHONHASHSEED to a "
+        "non-negative integer"
     )
 
 
@@ -173,8 +174,9 @@ class DiscretePathEnum(Algorithm):
         hash_seed = os.environ.get("PYTHONHASHSEED")
         if hash_seed is None or not hash_seed.isdigit():
             printer.print_normal(
-                "warning: PYTHONHASHSEED is not fixed; constraint ordering is not pinned, "
-                "so the pool may vary run to run despite -gen-seed. Set PYTHONHASHSEED for reproducibility."
+                "warning: PYTHONHASHSEED is not fixed; constraint ordering "
+                "is not pinned, so the pool may vary run to run despite "
+                "-gen-seed. Set PYTHONHASHSEED for reproducibility."
             )
 
         # z3 uses logic/seed; dreal uses config/logger/time-bound.
@@ -189,7 +191,7 @@ class DiscretePathEnum(Algorithm):
             )
 
         encoder = Encoder(model, goal, prop_dict, delta, tau_max)
-        pool: List[Dict[Variable, Constant]] = []
+        pool: list[dict[Variable, Constant]] = []
         block_id = 0
         unresolved = False
 
@@ -209,9 +211,9 @@ class DiscretePathEnum(Algorithm):
                     if verdict == UNKNOWN:
                         unresolved = True
                         printer.print_normal(
-                            "[kappa_path] depth {}: search UNRESOLVED (backend did "
-                            "not decide) -- the path space is NOT proven "
-                            "exhausted".format(depth))
+                            f"[kappa_path] depth {depth}: search UNRESOLVED "
+                            "(backend did not decide) -- the path space is NOT "
+                            "proven exhausted")
                     break
                 assn = oracle.model()
                 pool.append(assn)
@@ -219,9 +221,8 @@ class DiscretePathEnum(Algorithm):
                 block_id += 1
                 found += 1
                 printer.print_verbose(
-                    "[kappa_path] depth {}: {} path(s) here, {} total".format(
-                        depth, found, len(pool)
-                    )
+                    f"[kappa_path] depth {depth}: {found} path(s) here, "
+                    f"{len(pool)} total"
                 )
 
             encoder.reset()
