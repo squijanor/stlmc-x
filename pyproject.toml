@@ -52,6 +52,21 @@ stlmc-vis = "stlmc.cli.visualize:main"
 sdist.include = ["src/", "3rd_party/", "tests/", "generation_tests/"]
 wheel.packages = ["src/stlmc"]
 
+[tool.ruff]
+# Scoped to the files this fork owns. The upstream sources predate any linting
+# and would need changes unrelated to the fork's purpose, so they are outside
+# the check rather than excluded from individual rules.
+include = ["src/stlmc/generation/**/*.py", "generation_tests/**/*.py"]
+
+[tool.ruff.lint]
+# Correctness first: pyflakes (F) reports undefined names, unused and redefined
+# imports and unused variables, and bugbear (B) reports likely mistakes such as
+# a mutable default or a loop variable captured by a closure. F821 in particular
+# reports a name error in a branch no test reaches, without executing anything.
+# The rest keep the sources uniform: pycodestyle errors (E), import order (I)
+# and pyupgrade (UP), which is bounded by requires-python above.
+select = ["E", "F", "I", "UP", "B"]
+
 [tool.pytest.ini_options]
 testpaths = ["generation_tests"]
 filterwarnings = [

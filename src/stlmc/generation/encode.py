@@ -14,9 +14,9 @@ name from the modules that provide them.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Tuple
+from typing import Any
 
-from ..constraints.constraints import And, BoolVal, Formula, Variable, Constant
+from ..constraints.constraints import And, BoolVal, Constant, Formula, Variable
 from ..constraints.operations import substitution
 from ..encoding.enumerate import make_boolean_abstract_consts
 from ..encoding.monolithic import clause, k_size_stl_formula
@@ -41,9 +41,9 @@ class Encoding:
     #: behind its abstraction Bool, so z3 can solve it even for a nonlinear
     #: model. Required by the two-step pivot.
     skeleton: Formula
-    boolean_abstract: Dict
+    boolean_abstract: dict
     bound: int
-    range_dict: Dict
+    range_dict: dict
 
 
 class Encoder:
@@ -59,14 +59,15 @@ class Encoder:
         self,
         model: Model,
         goal: Goal,
-        prop_dict: Dict,
+        prop_dict: dict,
         delta: float,
         tau_max: float,
         *,
         static_depth: int | None = None,
     ) -> None:
         if isinstance(goal, ReachGoal):
-            raise ValueError("Encoder supports STL falsification goals, not reachability")
+            raise ValueError(
+                "Encoder supports STL falsification goals, not reachability")
         self.model = model
         self.goal = goal
         self.prop_dict = prop_dict
@@ -110,8 +111,8 @@ class Encoder:
         self.goal.clear()
 
     def counterexamples_payload(
-        self, assn_dicts: List[Dict[Variable, Constant]], label: str
-    ) -> Tuple[Any, ...]:
+        self, assn_dicts: list[dict[Variable, Constant]], label: str
+    ) -> tuple[Any, ...]:
         """Assemble the ``.counterexamples`` pool payload for a pool.
 
         A pickled 9-tuple in this fixed order:

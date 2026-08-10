@@ -35,20 +35,20 @@ from __future__ import annotations
 import abc
 import os
 from fractions import Fraction
-from typing import Dict, List, Tuple
+from typing import Dict, Tuple
 
 import z3
 
-from ..solver.z3 import z3Obj, Z3Assignment
 from ..constraints.constraints import (
-    RealVal,
     And,
     Constant,
     Formula,
     Geq,
     Leq,
+    RealVal,
     Variable,
 )
+from ..solver.z3 import Z3Assignment, z3Obj
 
 # Native SMT verdicts. Strings (not an Enum) so they are picklable across worker
 # processes.
@@ -103,14 +103,14 @@ class GrowthOracle(abc.ABC):
         return RealVal(str(f))
 
     @abc.abstractmethod
-    def model(self) -> Dict[Variable, Constant]: ...
+    def model(self) -> dict[Variable, Constant]: ...
 
     def check_with(self, formula: Formula) -> str:
         """SAT-check the current stack conjoined with ``formula``, leaving the
         stack unchanged."""
         self.push()
         try:
-            self.assert_(formula)
+            self.assert_(formula)  # noqa: UP005  -- see assert_ above, not unittest
             return self.check()
         finally:
             self.pop()
@@ -152,7 +152,7 @@ class Z3IncrementalOracle(GrowthOracle):
         self._sat_seen = False
         return UNSAT if r == z3.unsat else UNKNOWN
 
-    def model(self) -> Dict[Variable, Constant]:
+    def model(self) -> dict[Variable, Constant]:
         if not self._sat_seen:
             raise RuntimeError("model() called without a preceding SAT check()")
         return Z3Assignment(self._solver.model()).get_assignments()
@@ -178,15 +178,15 @@ def _exact_decimal(f: Fraction) -> str:
         fives += 1
     if d != 1:
         raise ValueError(
-            "no finite decimal expansion for {}; dReal's SMT2 parser has no p/q "
-            "rational literal".format(f))
+            f"no finite decimal expansion for {f}; dReal's SMT2 parser has no p/q "
+            "rational literal")
     scale = max(twos, fives)
     if scale == 0:
         return str(f.numerator)
     scaled = f.numerator * 10 ** scale // f.denominator
     sign = "-" if scaled < 0 else ""
     digits = str(abs(scaled)).rjust(scale + 1, "0")
-    return "{}{}.{}".format(sign, digits[:-scale], digits[-scale:])
+    return f"{sign}{digits[:-scale]}.{digits[-scale:]}"
 
 
 class DrealReSolveOracle(GrowthOracle):
@@ -202,8 +202,8 @@ class DrealReSolveOracle(GrowthOracle):
         self._logger = logger
         self._time_bound = time_bound
         # A stack of frames; each frame is a list of asserted formulas.
-        self._frames: List[List[Formula]] = [[]]
-        self._last_model: Dict[Variable, Constant] | None = None
+        self._frames: list[list[Formula]] = [[]]
+        self._last_model: dict[Variable, Constant] | None = None
 
     def assert_(self, formula: Formula) -> None:
         self._frames[-1].append(formula)
@@ -218,7 +218,7 @@ class DrealReSolveOracle(GrowthOracle):
         self._last_model = None
 
     def _all_consts(self) -> Formula:
-        flat: List[Formula] = [f for frame in self._frames for f in frame]
+        flat: list[Formula] = [f for frame in self._frames for f in frame]
         return And(flat)
 
     def check(self) -> str:
@@ -230,7 +230,7 @@ class DrealReSolveOracle(GrowthOracle):
         self._last_model = None
         return UNSAT if result == "True" else UNKNOWN
 
-    def model(self) -> Dict[Variable, Constant]:
+    def model(self) -> dict[Variable, Constant]:
         if self._last_model is None:
             raise RuntimeError("model() called without a preceding SAT check()")
         return self._last_model
@@ -289,7 +289,7 @@ class DrealReSolveOracle(GrowthOracle):
         # in one session). Give each call its own subdirectory and drop it after.
         # [gen] keep-smt2 = 1 retains them for diagnosis.
         DrealReSolveOracle._smt2_seq += 1
-        token = "kbox_{}_{}".format(os.getpid(), DrealReSolveOracle._smt2_seq)
+        token = f"kbox_{os.getpid()}_{DrealReSolveOracle._smt2_seq}"
         solver.set_file_name(token)
         try:
             keep = str(self._config.get_section("gen").get_value("keep-smt2")) == "1"
@@ -370,7 +370,7 @@ def make_oracle(
     if underlying == "dreal":
         return DrealReSolveOracle(config, logger, time_bound)
     raise NotImplementedError(
-        "generation supports the z3 and dreal backends; got '{}'".format(underlying)
+        f"generation supports the z3 and dreal backends; got '{underlying}'"
     )
 
 
@@ -382,7 +382,7 @@ def make_oracle(
 
 def box_constraint(bounds: BoxBounds) -> Formula:
     """``AND_i (lo_i <= x_i <= hi_i)`` over the given IC variables."""
-    terms: List[Formula] = []
+    terms: list[Formula] = []
     for var, (lo, hi) in bounds.items():
         terms.append(Geq(var, _real(lo)))
         terms.append(Leq(var, _real(hi)))
@@ -394,7 +394,7 @@ def box_infty(bounds: BoxBounds, drop_var: Variable, direction: int) -> Formula:
 
     ``direction == +1`` drops the upper bound of ``drop_var``; ``-1`` drops the
     lower bound."""
-    terms: List[Formula] = []
+    terms: list[Formula] = []
     for var, (lo, hi) in bounds.items():
         if var == drop_var:
             if direction > 0:
@@ -407,7 +407,8 @@ def box_infty(bounds: BoxBounds, drop_var: Variable, direction: int) -> Formula:
     return And(terms)
 
 
-def grow_bounds(bounds: BoxBounds, var: Variable, direction: int, delta: float) -> BoxBounds:
+def grow_bounds(bounds: BoxBounds, var: Variable, direction: int,
+                delta: float) -> BoxBounds:
     """Return a copy of ``bounds`` with the face ``(var, direction)`` shifted
     outward by ``delta``. Does not mutate the input."""
     lo, hi = bounds[var]
@@ -416,7 +417,7 @@ def grow_bounds(bounds: BoxBounds, var: Variable, direction: int, delta: float) 
     return new
 
 
-def fix_modes(mode_assignment: Dict[Variable, Constant]) -> Formula:
+def fix_modes(mode_assignment: dict[Variable, Constant]) -> Formula:
     """``AND_k (mode_k == word[k])`` pinning the discrete path.
 
     ``mode_assignment`` maps each per-step mode Variable to the Constant it took

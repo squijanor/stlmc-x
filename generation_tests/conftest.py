@@ -23,11 +23,19 @@ if os.path.isdir(os.path.join(_SRC, "stlmc", "generation")):
     sys.path.insert(0, _SRC)
 
 import stlmc.cli.mc  # noqa: E402,F401  -- import-order shim, see module docstring
-
-from stlmc.constraints.constraints import (
-    And, BoolVal, Constant, Geq, Gt, Leq, Lt, Real, RealVal, Variable,
+from stlmc.constraints.constraints import (  # noqa: E402
+    And,
+    BoolVal,
+    Constant,
+    Geq,
+    Gt,
+    Leq,
+    Lt,
+    Real,
+    RealVal,
+    Variable,
 )
-from stlmc.generation.oracle import SAT, UNKNOWN, UNSAT
+from stlmc.generation.oracle import SAT, UNKNOWN, UNSAT  # noqa: E402
 
 
 class FakeOracle:
@@ -82,7 +90,7 @@ class FakeOracle:
     def check_with(self, formula):
         self.push()
         try:
-            self.assert_(formula)
+            self.assert_(formula)  # noqa: UP005  -- solver protocol, not unittest
             return self.check()
         finally:
             self.pop()

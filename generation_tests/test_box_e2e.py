@@ -125,8 +125,9 @@ def test_deep_witnesses_are_theta_separated(run):
             i, j = deep[a_index], deep[b_index]
             gap = max(abs(col[i] - col[j]) for col in columns.values())
             assert gap >= THETA, (
-                "deep witnesses {} and {} are {} apart in L-inf, under theta {}"
-                .format(i, j, float(gap), float(THETA)))
+                f"deep witnesses {i} and {j} are {float(gap)} apart in "
+                f"L-inf, under theta {float(THETA)}"
+                )
 
 
 def test_frontier_markers_bound_the_pool(run):
@@ -145,7 +146,7 @@ def test_frontier_markers_bound_the_pool(run):
             values = ic_values(payload, var_id)
             if values and values[index] in (min(values), max(values)):
                 at_extreme = True
-        assert at_extreme, "marker {} is interior on every axis".format(index)
+        assert at_extreme, f"marker {index} is interior on every axis"
 
 
 def test_pool_has_no_duplicate_initial_conditions(run):

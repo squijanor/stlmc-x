@@ -21,5 +21,6 @@ def make_generation_algorithm(kind: str, config):
 
         return RegionBoxDiscovery()
     if kind == "compose":
-        raise NotImplementedError("generation strategy 'compose' is not implemented yet")
-    raise ValueError("unknown generation strategy: {!r}".format(kind))
+        raise NotImplementedError(
+            "generation strategy 'compose' is not implemented yet")
+    raise ValueError(f"unknown generation strategy: {kind!r}")

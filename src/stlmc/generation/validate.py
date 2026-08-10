@@ -79,13 +79,34 @@ import numpy
 from scipy.integrate import odeint
 
 from ..constraints.constraints import (
-    Add, Arccos, Arcsin, Arctan, Cos, Div, Int, IntVal, Mul, Neg, Ode, Pow,
-    Real, RealVal, Sin, Sqrt, Sub, Tan, Variable,
+    Add,
+    Arccos,
+    Arcsin,
+    Arctan,
+    Cos,
+    Div,
+    Int,
+    IntVal,
+    Mul,
+    Neg,
+    Ode,
+    Pow,
+    Real,
+    RealVal,
+    Sin,
+    Sqrt,
+    Sub,
+    Tan,
+    Variable,
 )
 from ..constraints.operations import substitution
 from ..exception.exception import NotSupportedError
 from ..visualize.visualizer import (
-    DiscreteSampler, Projector, SolutionPointSampler, Visualizer, robustness,
+    DiscreteSampler,
+    Projector,
+    SolutionPointSampler,
+    Visualizer,
+    robustness,
 )
 
 __all__ = ["validate_ce", "validate_pool", "write_report", "main"]
@@ -98,7 +119,7 @@ REFINE_FACTOR = 4
 
 @singledispatch
 def _num(const: Any, vec, var_list: List[Variable]) -> float:
-    raise NotSupportedError("cannot evaluate \"{}\" numerically".format(const))
+    raise NotSupportedError(f"cannot evaluate \"{const}\" numerically")
 
 
 def _register(cls, fn):
@@ -194,7 +215,8 @@ def validate_ce(assn, rest, tau: float, backend_delta: float, formula,
     point_samples, discrete_samples, times = _reconstruct(assn, rest, samples)
     time_max = max(t for seg in times for t in seg)
     dp: Dict[Tuple[Any, float], float] = {}
-    series = [[robustness(formula, point_samples, discrete_samples, t, times, time_max, dp)
+    series = [[robustness(formula, point_samples, discrete_samples, t, times,
+                          time_max, dp)
                for t in seg] for seg in times]
     flat = [x for seg in series for x in seg]
     rho0 = series[0][0]
@@ -240,20 +262,22 @@ def validate_pool(payload, samples: int = DEFAULT_SAMPLES, refine: bool = False,
         try:
             # the visualizer prints progress from inside robustness
             with contextlib.redirect_stdout(io.StringIO()):
-                verdict, rho0, lo, hi = validate_ce(assn, rest, tau, backend_delta, formula, samples)
-                rec.update(verdict=verdict, rho0="%.12g" % rho0,
-                           rho_min="%.12g" % lo, rho_max="%.12g" % hi)
+                verdict, rho0, lo, hi = validate_ce(assn, rest, tau,
+                                                    backend_delta, formula,
+                                                    samples)
+                rec.update(verdict=verdict, rho0=f"{rho0:.12g}",
+                           rho_min=f"{lo:.12g}", rho_max=f"{hi:.12g}")
                 if refine:
                     fine, rho0f, _, _ = validate_ce(assn, rest, tau, backend_delta,
                                                     formula, samples * REFINE_FACTOR)
                     rec["refined_verdict"] = fine
                     rec["stable"] = "yes" if fine == verdict else "no"
                     if fine != verdict:
-                        rec["note"] = "sampling-sensitive: rho(0) %.12g at %dx" % (
-                            rho0f, REFINE_FACTOR)
+                        rec["note"] = (f"sampling-sensitive: rho(0) "
+                                       f"{rho0f:.12g} at {REFINE_FACTOR}x")
         except Exception as exc:            # a reconstruction failure is a result
             rec["verdict"] = "error"
-            rec["note"] = "{}: {}".format(type(exc).__name__, str(exc)[:120])
+            rec["note"] = f"{type(exc).__name__}: {str(exc)[:120]}"
         rec["seconds"] = "%.2f" % (time.time() - started)
         records.append(rec)
         if progress is not None:
@@ -272,10 +296,10 @@ def summarize(records: List[Dict[str, Any]]) -> str:
     from collections import Counter
     counts = Counter(r["verdict"] for r in records)
     by_label = Counter((r["label"], r["verdict"]) for r in records)
-    lines = ["", "{} counterexample(s)".format(len(records))]
+    lines = ["", f"{len(records)} counterexample(s)"]
     for verdict in ("falsifier", "marginal", "threshold-only", "unverified", "error"):
         if counts[verdict]:
-            lines.append("  {:<12} {:>4}".format(verdict, counts[verdict]))
+            lines.append(f"  {verdict:<12} {counts[verdict]:>4}")
     unstable = [r for r in records if r["stable"] == "no"]
     if unstable:
         lines.append("  {:<12} {:>4}  (verdict changes under {}x sampling)".format(
@@ -292,14 +316,15 @@ def main(argv=None) -> int:
         description="Validate the counterexamples in a pool by simulation.")
     parser.add_argument("pool", help="a .counterexamples or .counterexample file")
     parser.add_argument("-samples", type=int, default=DEFAULT_SAMPLES,
-                        help="time samples per segment (default {})".format(DEFAULT_SAMPLES))
+                        help=f"time samples per segment (default {DEFAULT_SAMPLES})")
     parser.add_argument("-refine", action="store_true",
-                        help="re-validate at {}x sampling and flag unstable verdicts".format(
-                            REFINE_FACTOR))
+                        help=f"re-validate at {REFINE_FACTOR}x sampling and "
+                             f"flag unstable verdicts")
     parser.add_argument("-tau", type=float, default=None,
                         help="robustness threshold (default: the pool's own)")
     parser.add_argument("-delta", type=float, default=0.0,
-                        help="backend precision, e.g. the [dreal] precision value (default 0)")
+                        help="backend precision, e.g. the [dreal] precision "
+                             "value (default 0)")
     parser.add_argument("-out", default=None,
                         help="report path (default: <pool>.validation.csv)")
     args = parser.parse_args(argv)
@@ -309,22 +334,22 @@ def main(argv=None) -> int:
     if not isinstance(payload[0], list):
         payload = ([payload[0]],) + tuple(payload[1:])   # single-CE file
 
-    out = args.out or "{}.validation.csv".format(args.pool)
+    out = args.out or f"{args.pool}.validation.csv"
     total = len(payload[0])
     started = time.time()
 
     def progress(done, n):
         if done % 10 == 0 or done == n:
-            print("  validated {}/{}  ({:.0f}s)".format(done, n, time.time() - started),
+            print(f"  validated {done}/{n}  ({time.time() - started:.0f}s)",
                   flush=True)
 
-    print("validating {} counterexample(s) in {}".format(total, os.path.basename(args.pool)))
+    print(f"validating {total} counterexample(s) in {os.path.basename(args.pool)}")
     records = validate_pool(payload, samples=args.samples, refine=args.refine,
                             tau=args.tau, backend_delta=args.delta,
                             progress=progress)
     write_report(records, out)
     print(summarize(records))
-    print("\nwrote {}".format(out))
+    print(f"\nwrote {out}")
     return 0
 
 
