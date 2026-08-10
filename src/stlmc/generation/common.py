@@ -138,10 +138,12 @@ def scoped_verdict(pool, any_unresolved, visited, max_depth, *,
                    tag: str, nothing_found: str, unresolved_source: str):
     """The run's verdict, and the line explaining it (or None).
 
-    A verdict may only speak about the depths that were visited. The driver
+    A verdict may only speak about the depths that were **decided**. The driver
     prints "up to bound N" from the bound rather than from the explored depths,
-    so a run restricted with [gen] depths must not report True: absence over a
-    subset of depths is not absence up to the bound, and is reported as Unknown.
+    so a run that settled a subset must not report True: absence over a subset of
+    depths is not absence up to the bound, and is reported as Unknown. A caller
+    passes the depths it actually settled, which is not always the set it
+    targeted -- a depth can be visited and left open by a budget or a bound.
 
     ``tag``, ``nothing_found`` and ``unresolved_source`` are the caller's own
     wording: the rule is shared, the vocabulary for what a strategy looks for is
@@ -154,10 +156,11 @@ def scoped_verdict(pool, any_unresolved, visited, max_depth, *,
                            "was unresolved: reporting Unknown, not True")
     skipped = set(range(1, max_depth + 1)) - set(visited)
     if skipped:
-        seen = "/".join(str(d) for d in sorted(set(visited)))
+        seen = "/".join(str(d) for d in sorted(set(visited))) or "none"
         missed = "/".join(str(d) for d in sorted(skipped))
         return "Unknown", (
-            f"[{tag}] {nothing_found} over depth(s) {seen}, but [gen] depths "
-            f"skipped {missed} -- reporting Unknown, not True: absence over a "
-            "subset of depths is not absence up to the bound")
+            f"[{tag}] {nothing_found}, decided depth(s) {seen}, but depth(s) "
+            f"{missed} of 1..{max_depth} were not decided -- reporting Unknown, "
+            "not True: absence over a subset of depths is not absence up to the "
+            "bound")
     return "True", None

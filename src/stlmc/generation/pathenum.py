@@ -15,7 +15,9 @@ depths. Absent, a depth is enumerated to exhaustion.
 
 The blocking predicate is a Boolean clause over the per-step mode variables:
 radius 0 excludes exactly one location word; radius r excludes every word within
-Hamming distance r of it. A radius above 0 is a **coarsening**: it excludes words
+Hamming distance r of it. What a depth contributes is the set of *falsifying*
+words at that depth, a subset of the path lattice that depends on the property as
+much as on the model. A radius above 0 is a **coarsening**: it excludes words
 that were never exhibited as counterexamples, so an UNSAT verdict under it means
 no counterexample outside the union of the balls, not that the path lattice is
 exhausted. Each depth reports which of the two it reached. The verdict itself is
@@ -141,7 +143,11 @@ def _exhaustion_note(depth: int, found: int, coarsened: bool) -> str:
     """What an UNSAT at ``depth`` establishes, given what was blocked to get it.
 
     Three different claims share one verdict, and collapsing them turns a
-    coarsening heuristic or a budget into a statement about the model.
+    coarsening heuristic or a budget into a statement about the model. Note what
+    even the strongest of the three says: the blocks exclude the words already
+    exhibited, so an UNSAT means no *falsifying* word remains, not that the depth's
+    path lattice has been enumerated. The lattice is an upper bound on the pool
+    and the gap between them is a property of the goal, not only of the model.
     """
     if found == 0:
         return (f"[kappa_path] depth {depth}: no counterexample at this depth "
@@ -152,8 +158,9 @@ def _exhaustion_note(depth: int, found: int, coarsened: bool) -> str:
                 "also excludes words never exhibited, so absence of further "
                 "paths is NOT established; re-run with radius = 0 to make it "
                 "conclusive")
-    return (f"[kappa_path] depth {depth}: path lattice exhausted after {found} "
-            "path(s) -- every location word at this depth is covered")
+    return (f"[kappa_path] depth {depth}: falsifying words exhausted after "
+            f"{found} path(s) -- no location word outside the pool falsifies at "
+            "this depth")
 
 
 class DiscretePathEnum(Algorithm):
@@ -213,6 +220,10 @@ class DiscretePathEnum(Algorithm):
         block_id = 0
         unresolved = False
         first_depth = max_depth
+        # Depths settled by an UNSAT, which is not the same as the depths
+        # targeted: a budget can stop a depth before it is decided, and a budget
+        # of zero stops every depth before a single query is posed.
+        decided: list[int] = []
 
         for depth in target_depths:
             encoding = encoder.encode_at(depth)
@@ -237,6 +248,7 @@ class DiscretePathEnum(Algorithm):
                             "(backend did not decide) -- the path space is NOT "
                             "proven exhausted")
                     else:
+                        decided.append(depth)
                         printer.print_normal(
                             _exhaustion_note(depth, found, coarsened))
                     break
@@ -270,10 +282,11 @@ class DiscretePathEnum(Algorithm):
 
             encoder.reset()
 
-        # A coarsening radius cannot corrupt the verdict: an empty pool means no
+        # The verdict speaks about `decided`, not about what was targeted. A
+        # coarsening radius cannot corrupt it either: an empty pool means no
         # counterexample was found at any depth, so no block was ever asserted
         # and every UNSAT was decided on the bare encoding.
-        result, note = _verdict(pool, unresolved, target_depths, max_depth)
+        result, note = _verdict(pool, unresolved, decided, max_depth)
         if note:
             printer.print_normal(note)
         # The driver prints this as the bound a counterexample was found at, so

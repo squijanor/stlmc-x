@@ -172,6 +172,14 @@ class TestVerdict:
     def test_exhaustive_absence_is_true(self):
         assert _verdict([], False, [1, 2, 3], 3) == ("True", None)
 
+    def test_a_depth_left_open_by_a_budget_does_not_count_as_decided(self):
+        """The caller passes the depths it settled, not the ones it targeted.
+        A budget of zero visits every depth and settles none, which must not
+        read as absence."""
+        result, note = _verdict([], False, [], 2)
+        assert result == "Unknown"
+        assert "1/2" in note
+
     def test_the_note_names_the_strategy(self):
         _, note = _verdict([], False, [1], 2)
         assert note.startswith("[kappa_path]")

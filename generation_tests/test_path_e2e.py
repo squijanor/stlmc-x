@@ -183,18 +183,21 @@ def test_exhaustion_under_a_coarsening_radius_is_not_absence(tmp_path):
     assert "absence of further paths is NOT established" in stdout
 
 
-def test_exhaustion_without_a_radius_covers_the_lattice(tmp_path):
-    """At radius 0 the same UNSAT does establish it, and says so."""
+def test_exhaustion_without_a_radius_is_over_the_falsifying_words(tmp_path):
+    """At radius 0 the UNSAT does establish something, and the claim is bounded:
+    no word outside the pool falsifies. It is not that the depth's path lattice
+    was enumerated -- the falsifying subset depends on the goal, and on other
+    benchmarks it is a small fraction of the lattice."""
     stdout, _ = run_path(tmp_path, "    k-paths = 99\n    depths = 2")
-    assert "path lattice exhausted" in stdout, stdout
-    assert "every location word at this depth is covered" in stdout
+    assert "falsifying words exhausted" in stdout, stdout
+    assert "no location word outside the pool falsifies" in stdout
 
 
 def test_a_budgeted_stop_is_not_reported_as_exhaustion(tmp_path):
     """Stopping at k-paths says nothing about the rest of the lattice."""
     stdout, _ = run_path(tmp_path, "    k-paths = 1\n    depths = 2")
     assert "stopped at the [gen] k-paths budget" in stdout, stdout
-    assert "path lattice exhausted" not in stdout
+    assert "falsifying words exhausted" not in stdout
     assert "search exhausted" not in stdout
 
 
@@ -206,3 +209,27 @@ def test_a_radius_above_the_word_length_is_capped_and_reported(tmp_path):
     stdout, pool = run_path(tmp_path, gen, goal="f1", bound=3)
     assert pool is not None
     assert "capped to 1" in stdout, stdout
+
+
+def test_an_undecided_depth_is_reported_rather_than_waited_out(tmp_path):
+    """A solver call that will not return is bounded per call, and the result is
+    a reported UNRESOLVED depth and a verdict of Unknown -- not a hang. Under the
+    nonlinear logic this model's flows require, whether a depth is decided at all
+    depends on the order the constraints were built in, which PYTHONHASHSEED
+    fixes; at the seed the harness pins, depth 4 is not decided."""
+    gen = "    k-paths = 2\n    depths = 4\n    query-timeout = 2"
+    stdout, pool = run_path(tmp_path, gen, goal="f2", bound=4)
+    assert pool is None
+    assert "search UNRESOLVED" in stdout, stdout
+    assert "result : Unknown" in stdout, stdout
+
+
+def test_a_zero_budget_settles_nothing_and_says_so(tmp_path):
+    """[gen] k-paths = 0 visits every depth and poses no query at all. The
+    verdict is over the depths a run decided, not the ones it targeted, so this
+    reports Unknown -- it reported True, over the full bound, on no evidence."""
+    stdout, pool = run_path(tmp_path, "    k-paths = 0", goal="f2", bound=2)
+    assert pool is None
+    assert "result : True" not in stdout, stdout
+    assert "result : Unknown" in stdout
+    assert "were not decided" in stdout
