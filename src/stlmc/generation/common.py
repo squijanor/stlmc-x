@@ -17,6 +17,28 @@ blocking predicate, no oracle policy.
 ``[gen]`` accessors return ``None`` (or the supplied default) for an absent key,
 so a caller distinguishes "not configured" from a configured value and can apply
 its own default.
+
+Depth and bound
+---------------
+They are one quantity under two names. A strategy's *depth* is the argument to
+``Model.make_consts`` and to ``k_size_stl_formula``, which is exactly the
+unrolling index upstream sweeps from ``[common] bound``; the driver prints it
+back as "bound". "Depth" is kept because these strategies visit a *set* of them
+rather than sweeping upward, not because it denotes anything else.
+
+At depth *n* the encoding is one initial state, *n* steps each carrying a jump,
+and one final flow segment: **n+1 mode segments and n jumps**, hence a location
+word of *n+1* positions and *n+1* segment durations. Depth **0** is therefore
+well formed and not empty -- one segment, no jump, a word of one position -- and
+it is a depth at which a counterexample can exist and at which no other can.
+Upstream is not consistent about it: ``EnumerateAlgorithm`` sweeps ``0..N`` while
+``SmtAlgorithm`` sweeps ``1..N``, so the same model and property are reported one
+bound apart by the two. The strategies here follow the former and cover ``0..N``.
+
+Note this is *not* the quantity the STLMC papers call the bound: there it counts
+the variable points of the symbolic discrete signal (the size of the phi-refinement),
+which the encoding derives from this one as ``2*(depth+1)`` STL intervals. The two
+are locked together by the configuration but are not the same number.
 """
 
 from __future__ import annotations
@@ -76,8 +98,12 @@ def gen_str(config, key: str):
 
 
 def gen_depths(config, max_depth: int) -> list[int]:
-    """Target depths: the ``[gen] depths`` list clamped to 1..max_depth, or every
-    depth 1..max_depth when absent.
+    """Target depths: the ``[gen] depths`` list clamped to 0..max_depth, or every
+    depth 0..max_depth when absent.
+
+    The range starts at 0, not 1: depth 0 is the unrolling with no jump, which is
+    a trajectory like any other and is where upstream's own default algorithm
+    reports a large share of its counterexamples (see the module docstring).
 
     The list is slash-separated (e.g. ``"8/9/10/11"``): the config grammar lexes a
     bare number as a NUMBER token and accepts only a single VALUE token inside
@@ -86,9 +112,9 @@ def gen_depths(config, max_depth: int) -> list[int]:
     """
     raw = _gen_value(config, "depths")
     if raw is None:
-        return list(range(1, max_depth + 1))
+        return list(range(0, max_depth + 1))
     picked = sorted({int(tok) for tok in re.split(r"[,/]", str(raw)) if tok.strip()})
-    return [d for d in picked if 1 <= d <= max_depth]
+    return [d for d in picked if 0 <= d <= max_depth]
 
 
 def z3_logic(config) -> str:
@@ -145,6 +171,10 @@ def scoped_verdict(pool, any_unresolved, visited, max_depth, *,
     passes the depths it actually settled, which is not always the set it
     targeted -- a depth can be visited and left open by a budget or a bound.
 
+    The bound covers ``0..max_depth``. Depth 0 is part of it because it is a
+    reachable unrolling that carries no jump, so a run that leaves it out has not
+    established absence even after deciding every other depth.
+
     ``tag``, ``nothing_found`` and ``unresolved_source`` are the caller's own
     wording: the rule is shared, the vocabulary for what a strategy looks for is
     not.
@@ -154,13 +184,13 @@ def scoped_verdict(pool, any_unresolved, visited, max_depth, *,
     if any_unresolved:
         return "Unknown", (f"[{tag}] {nothing_found}, but {unresolved_source} "
                            "was unresolved: reporting Unknown, not True")
-    skipped = set(range(1, max_depth + 1)) - set(visited)
+    skipped = set(range(0, max_depth + 1)) - set(visited)
     if skipped:
         seen = "/".join(str(d) for d in sorted(set(visited))) or "none"
         missed = "/".join(str(d) for d in sorted(skipped))
         return "Unknown", (
             f"[{tag}] {nothing_found}, decided depth(s) {seen}, but depth(s) "
-            f"{missed} of 1..{max_depth} were not decided -- reporting Unknown, "
+            f"{missed} of 0..{max_depth} were not decided -- reporting Unknown, "
             "not True: absence over a subset of depths is not absence up to the "
             "bound")
     return "True", None

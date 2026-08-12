@@ -153,8 +153,22 @@ def test_full_coverage_still_reports_absence(tmp_path):
     assert "result : True" in stdout, stdout
 
 
+def test_a_counterexample_at_depth_zero_is_found_and_reported(tmp_path):
+    """Depth 0 unrolls to one mode segment and no jump, which is a trajectory
+    like any other. The depth set used to start at 1, so a counterexample that
+    exists only there was unreachable and an otherwise complete run reported
+    True. Its word has a single position."""
+    stdout, pool = run_path(tmp_path, "    depths = 0", goal="f1", bound=3)
+    assert pool is not None, "fixture assumes this goal falsifies at depth 0\n" + stdout
+    assert "result : False at bound 0" in stdout, stdout
+    with open(pool, "rb") as handle:
+        payload = pickle.load(handle)
+    assert len(payload[0]) == 1
+    assert [len(w) for w in words(payload)] == [1]
+
+
 def test_an_empty_target_depth_set_examines_nothing(tmp_path):
-    """depths is clamped to 1..bound, so it can select nothing. A run that
+    """depths is clamped to 0..bound, so it can select nothing. A run that
     examined no depth at all may not report absence."""
     stdout, pool = run_path(tmp_path, '    k-paths = 2\n    depths = "20/21"',
                             goal="f2", bound=3)

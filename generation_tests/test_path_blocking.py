@@ -20,6 +20,9 @@ from stlmc.solver.z3 import z3Obj
 # is MODES**LEN words, all of which are checked.
 MODES = 3
 
+# Every word of length 1, for the depth-0 case.
+ALL_WORDS_1 = {(m,) for m in range(MODES)}
+
 
 def word_assignment(word):
     """An assignment dict as a solver returns it, for a location word."""
@@ -170,7 +173,14 @@ class TestVerdict:
         assert "1/2/3" in note
 
     def test_exhaustive_absence_is_true(self):
-        assert _verdict([], False, [1, 2, 3], 3) == ("True", None)
+        assert _verdict([], False, [0, 1, 2, 3], 3) == ("True", None)
+
+    def test_skipping_depth_zero_forbids_true(self):
+        """Depth 0 is the unrolling with no jump. It is part of the bound,
+        so deciding every other depth is still not absence up to it."""
+        result, note = _verdict([], False, [1, 2, 3], 3)
+        assert result == "Unknown"
+        assert "0" in note.split("depth(s) ")[2], note
 
     def test_a_depth_left_open_by_a_budget_does_not_count_as_decided(self):
         """The caller passes the depths it settled, not the ones it targeted.
@@ -179,6 +189,15 @@ class TestVerdict:
         result, note = _verdict([], False, [], 2)
         assert result == "Unknown"
         assert "1/2" in note
+
+    def test_a_depth_zero_word_forces_radius_zero(self):
+        """A word at depth n has n+1 positions, so at depth 0 it has one and
+        the cap min(r, n) leaves no room for a ball: any radius encodes the
+        single-word block, with no indicator variables."""
+        block = block_radius(word_assignment([2]), 3, uid=0)
+        assert block.radius == 0
+        assert block.indicators == ()
+        assert admitted(block.clause, 1) == {w for w in ALL_WORDS_1 if w != (2,)}
 
     def test_the_note_names_the_strategy(self):
         _, note = _verdict([], False, [1], 2)

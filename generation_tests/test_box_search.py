@@ -334,14 +334,14 @@ class TestVerdict:
         assert "2/3/4/5" in note, "the note must name what was skipped"
 
     def test_exhaustive_absence_is_true(self):
-        assert _verdict([], False, [1, 2, 3], 3) == ("True", None)
+        assert _verdict([], False, [0, 1, 2, 3], 3) == ("True", None)
 
     def test_a_pool_outranks_a_skipped_depth(self):
         """Finding a CE is a positive result: it does not need full coverage."""
         assert _verdict(["a witness"], False, [5], 5)[0] == "False"
 
     def test_order_and_duplicates_in_the_depth_list_do_not_matter(self):
-        assert _verdict([], False, [3, 1, 2, 2], 3) == ("True", None)
+        assert _verdict([], False, [3, 1, 0, 2, 2], 3) == ("True", None)
 
 
 # =================================================================== lattice
