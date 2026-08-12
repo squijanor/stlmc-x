@@ -32,6 +32,11 @@ The pool carries counterexample assignments only: the auxiliary indicator
 variables a radius-r block introduces are part of the query, not of any
 counterexample, and are removed before an assignment is pooled.
 
+Every solver call is timed against the number of blocking clauses already in
+the query, since what re-solving costs under accumulated blocks cannot be
+recovered from a run's total afterwards. Per call the cost is reported
+verbosely; per depth it is reported always.
+
 Reproducibility: the generation seed is -gen-seed if given (>= 0), otherwise the
 PYTHONHASHSEED value; one of the two must be present. For the z3 backend the
 seed is passed as its random_seed. Constraint ordering is fixed by
@@ -41,6 +46,7 @@ alone does not pin it.
 
 from __future__ import annotations
 
+import time
 from functools import reduce
 from typing import NamedTuple
 
@@ -233,8 +239,19 @@ class DiscretePathEnum(Algorithm):
             found = 0
             coarsened = False   # a radius>=1 block was asserted at this depth
             capped = False      # the cap has been reported at this depth
+            blocks = 0          # blocking clauses in the query at this depth
+            calls: list[float] = []   # seconds taken by each solver call
             while per_depth is None or found < per_depth:
+                started = time.perf_counter()
                 verdict = oracle.check()
+                calls.append(time.perf_counter() - started)
+                # Cost against the number of blocks already asserted. A run's
+                # total does not decompose into these afterwards, and on a
+                # backend that re-solves the whole stack per call the two are
+                # the quantities a re-solve strategy is judged on.
+                printer.print_verbose(
+                    f"[kappa_path] depth {depth}: call {len(calls)} over "
+                    f"{blocks} block(s): {verdict} in {calls[-1]:.3f}s")
                 if verdict != SAT:
                     # UNSAT and UNKNOWN are different results. UNKNOWN means the
                     # backend gave up, which is NOT evidence of absence;
@@ -268,6 +285,7 @@ class DiscretePathEnum(Algorithm):
                 coarsened = coarsened or block.radius >= 1
                 auxiliary.update(block.indicators)
                 oracle.assert_(block.clause)
+                blocks += 1
                 block_id += 1
                 found += 1
                 printer.print_verbose(
@@ -279,6 +297,12 @@ class DiscretePathEnum(Algorithm):
                     f"[kappa_path] depth {depth}: stopped at the [gen] k-paths "
                     f"budget after {found} path(s) -- the path space at this "
                     "depth is NOT known to be exhausted")
+
+            # A depth that posed no query (a zero budget) has nothing to report.
+            if calls:
+                printer.print_normal(
+                    f"[kappa_path] depth {depth}: {len(calls)} solver call(s), "
+                    f"{sum(calls):.2f}s total, slowest {max(calls):.2f}s")
 
             encoder.reset()
 
