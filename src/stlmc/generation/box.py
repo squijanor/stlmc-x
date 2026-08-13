@@ -93,7 +93,14 @@ from .common import (
     z3_logic,
 )
 from .encode import Encoder
-from .oracle import SAT, UNKNOWN, UNSAT, Z3IncrementalOracle, make_oracle
+from .oracle import (
+    SAT,
+    UNKNOWN,
+    UNSAT,
+    Z3IncrementalOracle,
+    make_oracle,
+    query_timeout,
+)
 
 # Face-search precision on an exact oracle when [gen] bisect-iters is not set:
 # the located frontier is within theta * 2**-_BISECT_ITERS of the true crossing.
@@ -411,7 +418,13 @@ class RegionBoxDiscovery(Algorithm):
             f"[diag] skeleton size={_sz(encoding.skeleton)} "
             f"consts size={_sz(encoding.consts)} "
             f"abstract_time={_time.monotonic() - _t:.1f}s")
-        z3o = Z3IncrementalOracle(logic, seed, general=True)
+        # Built directly rather than through make_oracle, which cannot express
+        # general=True, so the configured bound has to be resolved and passed
+        # here; otherwise the skeleton solve silently keeps the constructor's
+        # default. This site is on the delta path too, since a delta backend
+        # always takes the two-step route.
+        z3o = Z3IncrementalOracle(logic, seed, general=True,
+                                  timeout=query_timeout(self._config))
         z3o.assert_(abstracted)
         for block in blocks:
             z3o.assert_(block)
@@ -570,7 +583,8 @@ class RegionBoxDiscovery(Algorithm):
             return self._pivot_two_step(encoding, logic, seed, blocks)
         # Only the exact backend reaches here; a delta backend always takes the
         # two-step path above.
-        oracle = Z3IncrementalOracle(logic, seed)
+        oracle = Z3IncrementalOracle(logic, seed,
+                                     timeout=query_timeout(self._config))
         oracle.assert_(encoding.consts)
         for block in blocks:
             oracle.assert_(block)
@@ -965,12 +979,21 @@ class RegionBoxDiscovery(Algorithm):
             pivot_timeout = (gen_float(config, "pivot-timeout")
                              or _DEFAULT_CANDIDATE_TIMEOUT)
             printer.print_normal(
-                "[kappa_box] solver budgets: query-timeout={}s, "
-                "pivot-timeout={}s per candidate, pivot-budget={}s per depth "
-                "([gen] query-timeout = 0 disables)".format(
-                    gen_float(config, "query-timeout") or 60.0,
+                "[kappa_box] pivot budgets: pivot-timeout={}s per candidate, "
+                "pivot-budget={}s per depth".format(
                     pivot_timeout,
                     gen_float(config, "pivot-budget") or 120.0))
+
+        # Reported on either backend, because it bounds every solver call the
+        # strategy makes on either. Resolved through `query_timeout` rather than
+        # read a second time here: `gen_float` folds 0 into None, so a disabled
+        # bound was reported as the default, and it raises on the other
+        # spellings that disable one.
+        bound = query_timeout(config)
+        printer.print_normal(
+            "[kappa_box] query-timeout={} per solver call "
+            "([gen] query-timeout = 0 disables)".format(
+                "off" if bound is None else f"{bound}s"))
 
         encoder = Encoder(model, goal, prop_dict, delta, tau_max)
         pool: list[dict[Variable, Constant]] = []

@@ -177,6 +177,40 @@ def test_the_printed_verdict_matches_the_pool(run):
     assert ("result : False" in stdout) == (pool is not None)
 
 
+def test_a_configured_query_timeout_reaches_the_pivot(tmp_path):
+    """[gen] query-timeout bounds the pivot's own solver.
+
+    The pivot builds its oracle directly rather than through ``make_oracle``, so
+    a configured bound reaches it only if the site passes it explicitly. Set
+    below z3's own resolution every query answers unknown, the pivot cannot be
+    decided, and the run must say so. A run that ignored the key would take the
+    constructor's 60 s default instead, decide the pivot, and report False: the
+    assertion separates "the bound arrived" from "the bound was 60 s".
+    """
+    stdout, pool = run_box(tmp_path, extra="depths = 2\n    query-timeout = 0.001")
+    assert "pivot search UNRESOLVED" in stdout, stdout
+    assert "result : Unknown" in stdout, stdout
+    assert pool is None, "an undecided pivot must not produce a pool"
+
+
+def test_the_reported_bound_is_the_resolved_one(tmp_path):
+    """The banner must agree with the bound the oracles were given.
+
+    It is reported on this backend at all because the bound governs every solver
+    call the strategy makes here. Re-reading the key rather than resolving it
+    disagreed with the oracles: a reader for positive budgets folds a disabled
+    bound to its default, and rejects the words that disable one, so a run could
+    report a bound nothing was holding to -- or fail before it started.
+    """
+    for spelling, reported in (("300", "query-timeout=300.0s"),
+                               ("0", "query-timeout=off"),
+                               ('"off"', "query-timeout=off")):
+        work = tmp_path / spelling.strip('"')
+        work.mkdir()
+        stdout, _ = run_box(work, extra=f"depths = 2\n    query-timeout = {spelling}")
+        assert reported in stdout, (spelling, stdout)
+
+
 def test_a_restricted_run_never_claims_absence_up_to_the_bound(tmp_path):
     """[gen] depths restricts what the verdict has seen.
 
