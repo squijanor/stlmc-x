@@ -191,6 +191,11 @@ def test_a_configured_query_timeout_reaches_the_pivot(tmp_path):
     assert "pivot search UNRESOLVED" in stdout, stdout
     assert "result : Unknown" in stdout, stdout
     assert pool is None, "an undecided pivot must not produce a pool"
+    # The advice must name the bound that bit. On this backend the pivot is one
+    # query and pivot-timeout is not read at all, so naming it would send a
+    # reader to a key with no effect on the run in front of them.
+    assert "raise [gen] query-timeout" in stdout, stdout
+    assert "pivot-timeout" not in stdout, stdout
 
 
 def test_the_reported_bound_is_the_resolved_one(tmp_path):

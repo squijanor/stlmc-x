@@ -332,6 +332,84 @@ class _Theta:
                 f" (fallback {float(self.absolute)})")
 
 
+class _WordRotation:
+    """The ``word-rotate`` coverage heuristic, as a policy over verdicts.
+
+    A mode word is dropped after ``limit`` consecutive **refutations** of
+    candidates carrying it. Only UNSAT is one. An UNKNOWN carries no information
+    about the query that produced it -- it says the candidate was expensive, not
+    that its word is infeasible -- so an expired per-candidate bound may neither
+    advance the streak nor reset it: undecided candidates are stepped over and
+    the run of refutations continues across them.
+
+    Counting an expiry as a refutation discards a word for a solver reason. It
+    was measured doing exactly that: a depth-3 word whose candidates each hit a
+    60 s ``pivot-timeout`` was blocked after 30 of them, on a goal whose
+    published counterexample lives at that depth.
+
+    ``limit = 0`` disables the heuristic, and a candidate with no mode word is
+    never counted.
+    """
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.dropped = 0        # words blocked by the heuristic
+        self.undecided = 0      # candidates the oracle did not decide
+        self._word = None
+        self._streak = 0
+
+    @property
+    def streak(self) -> int:
+        """Consecutive refutations of the word currently under the counter."""
+        return self._streak
+
+    def refuted(self, word) -> bool:
+        """Record a refutation of a candidate carrying ``word``.
+
+        Returns True when that word has reached the limit and must be blocked;
+        the counter is reset then, so one word is reported once per run of
+        refutations."""
+        if not self.limit or not word:
+            return False
+        self._streak = self._streak + 1 if word == self._word else 1
+        self._word = word
+        if self._streak >= self.limit:
+            self._word, self._streak = None, 0
+            self.dropped += 1
+            return True
+        return False
+
+    def undecided_candidate(self) -> None:
+        """Record a candidate the oracle left undecided. Deliberately does not
+        touch the streak: an UNKNOWN is evidence in neither direction."""
+        self.undecided += 1
+
+
+def _binding_bound(attempts, refuted, undecided, undecided_seconds, elapsed):
+    """Which ``[gen]`` key bounded a candidate search that gave up, and why.
+
+    The loop always ends on the ``pivot-budget`` deadline, so the exit condition
+    by itself names nothing. What names a knob is where the budget went. Time
+    spent on candidates that expired undecided is time a larger ``pivot-budget``
+    would only buy more expiries of, so there the bound that bit is
+    ``pivot-timeout``; a search whose candidates were decided, and quickly, was
+    bounded by the budget itself, and raising the per-call bound would buy it
+    strictly fewer candidates. Both directions were measured on space-ode: f2@3
+    expiring at ``pivot-timeout``, f1@2 refuting 972 candidates at ~0.1 s each
+    until ``pivot-budget`` ran out.
+
+    Returns ``(key, explanation)``.
+    """
+    if undecided and 2 * undecided_seconds >= elapsed:
+        return ("pivot-timeout",
+                f"{undecided} of {attempts} candidate(s) expired undecided, "
+                f"consuming {undecided_seconds:.0f}s of the "
+                f"{elapsed:.0f}s search")
+    return ("pivot-budget",
+            f"{attempts} candidate(s) in {elapsed:.0f}s: {refuted} refuted, "
+            f"{undecided} undecided")
+
+
 def _verdict(pool, any_unresolved, visited, max_depth):
     """kappa_box's wording for the shared depth-scoping rule."""
     return scoped_verdict(pool, any_unresolved, visited, max_depth,
@@ -390,9 +468,34 @@ class RegionBoxDiscovery(Algorithm):
         # Per-counterexample labels aligned to the returned pool; read by the
         # driver to append the optional labels element to the payload.
         self.ce_labels: list[str] | None = None
+        # Scoped to one depth by `run`; initialised here so a caller that drives
+        # a pivot search on its own does not have to.
+        self._rotated_words = 0
+        self._undecided_candidates = 0
+        self._pivot_giveup = None
 
     def set_debug(self, msg: str) -> None:
         self.debug_name = msg
+
+    def _skeleton_oracle(self, logic, seed):
+        """The outer, purely propositional solver of the two-step pivot search.
+
+        Built directly rather than through make_oracle, which cannot express
+        general=True, so the configured bound has to be resolved and passed
+        here; otherwise the skeleton solve silently keeps the constructor's
+        default. It is a method rather than an inline construction so a test can
+        substitute an oracle whose answers are given explicitly and exercise the
+        candidate loop without a solver."""
+        return Z3IncrementalOracle(logic, seed, general=True,
+                                   timeout=query_timeout(self._config))
+
+    def _candidate_oracle(self, logic, seed):
+        """The inner ODE-feasibility oracle, one per candidate. This site is on
+        the delta path too, since a delta backend always takes the two-step
+        route. Substitutable for the same reason as :meth:`_skeleton_oracle`."""
+        return make_oracle(self._underlying, logic=logic, seed=seed,
+                           config=self._config, logger=self._logger,
+                           time_bound=self._tau_max)
 
     def _pivot_two_step(self, encoding, logic, seed, blocks):
         """Find a pivot in two steps, as STLMC's own checking does.
@@ -411,6 +514,7 @@ class RegionBoxDiscovery(Algorithm):
           3. On unsat, the skeleton is blocked in z3 and step 1 repeats.
         """
         printer = self._printer
+        self._pivot_giveup = None
         from ..tree.operations import size_of_tree as _sz
         _t = _time.monotonic()
         abstracted, fa_map = _abstract_foralls(encoding.skeleton)
@@ -418,13 +522,7 @@ class RegionBoxDiscovery(Algorithm):
             f"[diag] skeleton size={_sz(encoding.skeleton)} "
             f"consts size={_sz(encoding.consts)} "
             f"abstract_time={_time.monotonic() - _t:.1f}s")
-        # Built directly rather than through make_oracle, which cannot express
-        # general=True, so the configured bound has to be resolved and passed
-        # here; otherwise the skeleton solve silently keeps the constructor's
-        # default. This site is on the delta path too, since a delta backend
-        # always takes the two-step route.
-        z3o = Z3IncrementalOracle(logic, seed, general=True,
-                                  timeout=query_timeout(self._config))
+        z3o = self._skeleton_oracle(logic, seed)
         z3o.assert_(abstracted)
         for block in blocks:
             z3o.assert_(block)
@@ -467,21 +565,23 @@ class RegionBoxDiscovery(Algorithm):
             f"abstracted, {len(timing)} timing facts, endpoint implications on")
 
         # Word rotation. z3 exhausts the forall assignments of one mode word
-        # before trying another, so a rejected word can absorb the whole budget.
-        # After N consecutive rejections under the same word the word is blocked
-        # outright, at no solver cost. A heuristic: it can block a word that
-        # would have been feasible under a later assignment, trading
+        # before trying another, so a refuted word can absorb the whole budget.
+        # After N consecutive refutations under the same word the word is
+        # blocked outright, at no solver cost. A heuristic: it can block a word
+        # that would have been feasible under a later assignment, trading
         # completeness for coverage, which is why an exhausted search is not
-        # reported as absence once it has fired. 0 disables.
+        # reported as absence once it has fired. 0 disables. Only a refutation
+        # counts -- see _WordRotation.
         rotate = gen_int(self._config, "word-rotate")
-        rotate = 30 if rotate is None else rotate
-        streak_word, streak = None, 0
-        rotated = 0    # heuristic drops; an UNSAT verdict is then inconclusive
+        rotation = _WordRotation(30 if rotate is None else rotate)
 
         every = gen_int(self._config, "log-every") or 25
         budget = gen_float(self._config, "pivot-budget") or 120.0
-        deadline = _time.monotonic() + budget
-        attempt = 0
+        candidate_bound = (gen_float(self._config, "pivot-timeout")
+                           or _DEFAULT_CANDIDATE_TIMEOUT)
+        started = _time.monotonic()
+        deadline = started + budget
+        attempt, refuted, undecided_seconds = 0, 0, 0.0
         while _time.monotonic() < deadline:
             attempt += 1
             self._metrics["candidates"] += 1
@@ -526,18 +626,18 @@ class RegionBoxDiscovery(Algorithm):
             # cannot go back into z3.
             block_this = _skeleton_fix(candidate)
 
-            d = make_oracle(self._underlying, logic=logic, seed=seed,
-                            config=self._config, logger=self._logger,
-                            time_bound=self._tau_max)
-            d.set_budget(gen_float(self._config, "pivot-timeout")
-                         or _DEFAULT_CANDIDATE_TIMEOUT)
+            d = self._candidate_oracle(logic, seed)
+            d.set_budget(candidate_bound)
             d.assert_(encoding.consts)
             d.assert_(pinned)
             _t0 = _time.monotonic()
             v = d.check()
             _el = _time.monotonic() - _t0
             d.set_budget("unset")
-            if v == SAT or attempt % every == 0 or attempt == 1:
+            # An expiry is always printed: it costs the whole per-candidate
+            # bound, so it is both rare and the thing a short search has to be
+            # read against.
+            if v != UNSAT or attempt % every == 0 or attempt == 1:
                 printer.print_verbose(
                     "[kappa_box/two-step] candidate {} (word {}): dreal says {} "
                     "({:.1f}s)".format(attempt, word or "-", v, _el))
@@ -546,23 +646,33 @@ class RegionBoxDiscovery(Algorithm):
                 model = d.model()
                 d.assert_(pinned)
                 return d, model, encoding
-            # unsat or unknown: this skeleton is not usable, try another
+            # Not usable *as tested*: block exactly the assignment that was
+            # checked so the search moves on. What that block is worth differs
+            # by verdict -- UNSAT refutes the assignment, UNKNOWN only records
+            # that it was tried -- and only the refutation is evidence about the
+            # word it carries.
             z3o.assert_(Not(block_this))
-            if rotate and word:
-                streak = streak + 1 if word == streak_word else 1
-                streak_word = word
-                if streak >= rotate:
+            if v == UNSAT:
+                refuted += 1
+                if rotation.refuted(word):
                     z3o.assert_(Not(mode_only))
-                    rotated += 1
                     self._rotated_words += 1
                     printer.print_verbose(
-                        f"[kappa_box/two-step] rotating off word {word} after {streak} "
-                        "consecutive rejections")
-                    streak_word, streak = None, 0
+                        f"[kappa_box/two-step] rotating off word {word} after "
+                        f"{rotation.limit} consecutive refutations")
+            else:
+                rotation.undecided_candidate()
+                undecided_seconds += _el
+                self._undecided_candidates += 1
 
+        elapsed = _time.monotonic() - started
+        self._pivot_giveup = _binding_bound(
+            attempt, refuted, rotation.undecided, undecided_seconds, elapsed)
         printer.print_normal(
-            f"[kappa_box/two-step] gave up after {attempt} candidates "
-            f"({rotated} mode word(s) rotated off)")
+            f"[kappa_box/two-step] gave up after {attempt} candidates: "
+            f"{refuted} refuted, {rotation.undecided} undecided at "
+            f"[gen] pivot-timeout = {candidate_bound}s, "
+            f"{rotation.dropped} mode word(s) rotated off")
         self._last_pivot_verdict = UNKNOWN
         return None, None, None
 
@@ -961,6 +1071,8 @@ class RegionBoxDiscovery(Algorithm):
         self._metrics = _Counter()
         self._any_unresolved = False
         self._rotated_words = 0
+        self._undecided_candidates = 0
+        self._pivot_giveup = None
         if underlying != "z3":
             # A configuration still setting a removed key would otherwise get
             # silence, which reads as the key being in effect.
@@ -1004,7 +1116,10 @@ class RegionBoxDiscovery(Algorithm):
         for depth in target_depths:
             blocks: list[Formula] = []  # per depth: independent region discovery
             boxes_here = 0
-            self._rotated_words = 0     # heuristic pruning is scoped to a depth
+            # Both caveats on an exhaustion claim are scoped to a depth, since
+            # the structure space and its blocks are.
+            self._rotated_words = 0
+            self._undecided_candidates = 0
             while per_depth_boxes is None or boxes_here < per_depth_boxes:
                 oracle, pivot, encoding = self._pivot_at(
                     encoder, depth, logic, seed, blocks
@@ -1012,21 +1127,38 @@ class RegionBoxDiscovery(Algorithm):
                 if pivot is None:
                     if getattr(self, "_last_pivot_verdict", None) == UNKNOWN:
                         self._any_unresolved = True
+                        # Name the bound that actually bit. `pivot-timeout` and
+                        # `pivot-budget` are read by the two-step search alone,
+                        # so on the exact backend -- one query, no candidate
+                        # loop -- neither is the knob: `query-timeout` is.
+                        if self._pivot_giveup is None:
+                            key, why = ("query-timeout",
+                                        "the pivot query was left undecided")
+                        else:
+                            key, why = self._pivot_giveup
                         printer.print_normal(
-                            f"[kappa_box] depth {depth}: pivot search "
-                            "UNRESOLVED (solver budget exhausted) -- the region "
-                            "is NOT proven empty; raise [gen] pivot-timeout to "
-                            "search further")
+                            f"[kappa_box] depth {depth}: pivot search UNRESOLVED "
+                            f"({why}) -- the region is NOT proven empty; raise "
+                            f"[gen] {key} to search further")
                     else:
                         # UNSAT: the structure space is exhausted. What that is
-                        # worth depends on what was pruned -- word rotation
-                        # removes structures the solver never tried, so under it
-                        # this means no further structure is reachable, not that
-                        # none exists.
-                        heuristic = []
+                        # worth depends on what left it. Two things remove
+                        # candidates the oracle never refuted: word rotation
+                        # blocks structures outright, and a candidate that
+                        # expired undecided is blocked so the search can make
+                        # progress, on no evidence about it. Under either,
+                        # exhaustion means no further structure was reachable,
+                        # not that none exists.
+                        heuristic, remedies = [], []
                         if self._rotated_words:
                             heuristic.append(
                                 f"{self._rotated_words} word(s) rotated off")
+                            remedies.append("word-rotate = 0")
+                        if self._undecided_candidates:
+                            heuristic.append(
+                                f"{self._undecided_candidates} candidate(s) "
+                                "blocked undecided")
+                            remedies.append("a larger [gen] pivot-timeout")
                         scope = ("no counterexample at this depth"
                                  if not blocks else
                                  f"no counterexample outside the "
@@ -1034,10 +1166,11 @@ class RegionBoxDiscovery(Algorithm):
                         if heuristic:
                             printer.print_normal(
                                 "[kappa_box] depth {}: structure space exhausted, "
-                                "but heuristic pruning was active ({}) -- absence is "
-                                "NOT established; re-run with word-rotate = 0 "
-                                "to make it conclusive".format(
-                                    depth, ", ".join(heuristic)))
+                                "but not every candidate was refuted ({}) -- "
+                                "absence is NOT established; re-run with {} to "
+                                "make it conclusive".format(
+                                    depth, ", ".join(heuristic),
+                                    " and ".join(remedies)))
                         else:
                             printer.print_normal(
                                 f"[kappa_box] depth {depth}: structure space "
