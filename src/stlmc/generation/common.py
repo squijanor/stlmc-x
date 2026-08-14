@@ -117,6 +117,80 @@ def gen_depths(config, max_depth: int) -> list[int]:
     return [d for d in picked if 0 <= d <= max_depth]
 
 
+def _check_int(key: str, raw: str) -> None:
+    try:
+        int(raw)
+    except ValueError:
+        raise ValueError(
+            f'[gen] {key} = "{raw}": an integer is required') from None
+
+
+def _check_depths(key: str, raw: str) -> None:
+    for tok in re.split(r"[,/]", str(raw)):
+        if tok.strip():
+            try:
+                int(tok)
+            except ValueError:
+                raise ValueError(
+                    f'[gen] {key} = "{raw}": "{tok.strip()}" is not an '
+                    'integer; the list is slash-separated, e.g. "8/9/10/11"'
+                ) from None
+
+
+def _check_query_timeout(key: str, raw: str) -> None:
+    if str(raw).strip() in ("0", "off", "none"):
+        return
+    try:
+        sec = float(raw)
+    except ValueError:
+        raise ValueError(
+            f'[gen] {key} = "{raw}": a number of seconds is required '
+            '(0, "off" or "none" disables the per-call bound)') from None
+    if sec != sec or sec in (float("inf"), float("-inf")) or sec < 0:
+        raise ValueError(
+            f'[gen] {key} = "{raw}": a finite number of seconds >= 0 is '
+            'required (0, "off" or "none" disables the per-call bound)')
+
+
+def _check_flag01(key: str, raw: str) -> None:
+    if str(raw).strip() not in ("0", "1"):
+        raise ValueError(f'[gen] {key} = "{raw}": 0 or 1 is required')
+
+
+# Key -> check. Entries cover the keys kappa_path reads and the keys the
+# backends share; the sibling strategy registers its own keys here as they
+# gain validation. A key with no entry passes unchecked.
+_GEN_KEY_CHECKS = {
+    "radius": _check_int,
+    "k-paths": _check_int,
+    "depths": _check_depths,
+    "query-timeout": _check_query_timeout,
+    "keep-smt2": _check_flag01,
+}
+
+
+def validate_gen(config, keys=None) -> None:
+    """Fail fast on malformed ``[gen]`` values.
+
+    Run at strategy start, before any solver work, so a bad value dies as a
+    configuration error naming the key and the section rather than as a bare
+    ``ValueError`` deep inside a run (where the driver's blanket handler
+    reduces it to an unattributed one-liner). ``keys`` restricts the check to
+    the keys a caller reads; by default every key with an entry in
+    ``_GEN_KEY_CHECKS`` that is present in the configuration is checked.
+    Parse-level validation only: range folds that have defined semantics
+    (a negative radius, say) stay in the strategy, next to their notices.
+    """
+    if config is None or not config.is_section_in("gen"):
+        return
+    section = config.get_section("gen")
+    for key, check in _GEN_KEY_CHECKS.items():
+        if keys is not None and key not in keys:
+            continue
+        if section.is_argument_in(key):
+            check(key, section.get_value(key))
+
+
 def z3_logic(config) -> str:
     """The z3 logic name for ``[z3] logic``, defaulting to linear arithmetic."""
     if config is not None and config.is_section_in("z3"):
@@ -126,16 +200,23 @@ def z3_logic(config) -> str:
     return "LRA"
 
 
-def resolve_seed(config) -> int:
+def resolve_seed(config, printer=None) -> int:
     """The generation seed: -gen-seed if given (>= 0), else PYTHONHASHSEED.
 
-    Raises if neither is present, so a run is never silently non-reproducible.
+    A negative -gen-seed is ignored by design (the fallthrough to
+    PYTHONHASHSEED), but never silently: the notice below is what tells a
+    reader of the log which seed source the run actually used. Raises if
+    neither source is present, so a run is never silently non-reproducible.
     """
     common = config.get_section("common")
     if common.is_argument_in("gen-seed"):
         value = int(common.get_value("gen-seed"))
         if value >= 0:
             return value
+        if printer is not None:
+            printer.print_normal(
+                f"warning: -gen-seed {value} is negative and is ignored; "
+                "falling back to PYTHONHASHSEED")
     hash_seed = os.environ.get("PYTHONHASHSEED")
     if hash_seed is not None and hash_seed.isdigit():
         return int(hash_seed)

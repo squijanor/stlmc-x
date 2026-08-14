@@ -3,7 +3,7 @@
 Enumerates structurally distinct counterexample paths by blocking each found
 location word and re-solving. The traversal visits a set of target depths --
 ``[gen] depths`` as a slash-separated list (e.g. ``"8/9/10/11"``), or every depth
-1..N by default -- and at each target depth it solves the falsification encoding,
+0..N by default -- and at each target depth it solves the falsification encoding,
 records the counterexample, excludes a Hamming-ball of radius r around its
 location word, and re-solves until that depth is exhausted or its per-depth
 budget is reached.
@@ -26,7 +26,8 @@ no block was ever asserted, hence every UNSAT was decided on the bare encoding.
 
 At depth n a location word has n+1 positions, so a radius above n encodes an
 unsatisfiable block and would report the depth as exhausted after a single path.
-The radius is capped at the word length, and the cap is reported.
+The radius is capped at one below the word length -- the coarsest ball that
+still admits a word -- and the cap is reported.
 
 The pool carries counterexample assignments only: the auxiliary indicator
 variables a radius-r block introduces are part of the query, not of any
@@ -71,6 +72,7 @@ from .common import (
     gen_int,
     resolve_seed,
     scoped_verdict,
+    validate_gen,
     warn_unpinned_hashseed,
     z3_logic,
 )
@@ -102,6 +104,43 @@ def _location_word(assn: dict[Variable, Constant]) -> list[tuple[Variable, Const
     return [(var, val) for _, var, val in steps]
 
 
+def _canon_mode_val(val: Constant) -> Constant:
+    """Canonical constant for an integral mode value: ``1.000000`` -> ``1``.
+
+    The delta backend formats every model value as a fixed-point decimal; the
+    block compares against it, so normalise to the integer spelling both
+    solvers parse canonically. A non-numeric or non-integral value is returned
+    unchanged -- detecting those is the caller's job (see ``_off_lattice``)."""
+    try:
+        f = float(val.value)
+    except (TypeError, ValueError):
+        return val
+    if f.is_integer():
+        return type(val)(str(int(f)))
+    return val
+
+
+def _off_lattice(word: list[tuple[Variable, Constant]]) -> list[str]:
+    """The word positions whose mode value is not an integer, rendered for a
+    log line; empty when the word is sound.
+
+    A delta backend reports each model value as the midpoint of an interval.
+    If that midpoint is not integral for a *mode* variable, the word it spells
+    is not the word the solver satisfied, and a block built from it misses:
+    at radius 0 the solver can return the same model forever, at radius >= 1
+    the ball is centred off-word. Such a model cannot be blocked or pooled."""
+    bad = []
+    for var, val in word:
+        try:
+            f = float(val.value)
+        except (TypeError, ValueError):
+            bad.append(f"{var.id}={val.value}")
+            continue
+        if not f.is_integer():
+            bad.append(f"{var.id}={val.value}")
+    return bad
+
+
 def block_radius(assn: dict[Variable, Constant], radius: int, uid: int) -> PathBlock:
     """Clause excluding every location word within Hamming distance ``radius`` of
     ``assn``'s word. ``uid`` makes the radius>=1 indicator variables unique.
@@ -121,6 +160,7 @@ def block_radius(assn: dict[Variable, Constant], radius: int, uid: int) -> PathB
             "modes to enumerate"
         )
 
+    word = [(var, _canon_mode_val(val)) for var, val in word]
     effective = max(0, min(radius, len(word) - 1))
     if effective == 0:
         return PathBlock(Or([Neq(var, val) for var, val in word]), 0, ())
@@ -185,15 +225,33 @@ class DiscretePathEnum(Algorithm):
         delta = float(common.get_value("threshold"))
         underlying = common.get_value("solver")
 
+        # Fail fast on malformed [gen] values, before any solver work, so a
+        # typo dies as a configuration error naming the key rather than as a
+        # bare ValueError somewhere below.
+        validate_gen(config)
+
         per_depth = gen_int(config, "k-paths")  # per target depth; None -> exhaust
         target_depths = gen_depths(config, max_depth)
-        radius = gen_int(config, "radius") or 0
+        radius = gen_int(config, "radius")
         logic = z3_logic(config)
-        seed = resolve_seed(config)
+        seed = resolve_seed(config, printer)
+
+        # Fold out-of-range values here, each with a notice, so the banner below
+        # states what the run actually uses rather than what was written.
+        if radius is not None and radius < 0:
+            printer.print_normal(
+                f"[kappa_path] [gen] radius {radius} is negative; using 0")
+        radius = max(0, radius or 0)
+        if per_depth is not None and per_depth < 0:
+            printer.print_normal(
+                f"[kappa_path] [gen] k-paths {per_depth} is negative; using 0 "
+                "(every depth is visited, no query is posed, nothing is decided)")
+            per_depth = 0
 
         # The resolved parameters, not the configured ones: depths are clamped to
-        # 1..bound, and an unrecognised key reads as absent, so a log that does
-        # not state them cannot be checked against what was intended.
+        # 0..bound, negatives fold to 0 above, and an unrecognised key reads as
+        # absent, so a log that does not state them cannot be checked against
+        # what was intended.
         printer.print_normal(
             "[kappa_path] radius={}, k-paths={}, target depths={}".format(
                 radius,
@@ -201,7 +259,7 @@ class DiscretePathEnum(Algorithm):
                 "/".join(str(d) for d in target_depths) or "none"))
         if not target_depths:
             printer.print_normal(
-                f"[kappa_path] [gen] depths selected no depth in 1..{max_depth}, "
+                f"[kappa_path] [gen] depths selected no depth in 0..{max_depth}, "
                 "so no depth is examined and nothing can be concluded")
 
         warn_unpinned_hashseed(printer)
@@ -260,10 +318,10 @@ class DiscretePathEnum(Algorithm):
                     # what was blocked to reach it (see _exhaustion_note).
                     if verdict == UNKNOWN:
                         unresolved = True
+                        why = oracle.unknown_reason() or "backend did not decide"
                         printer.print_normal(
                             f"[kappa_path] depth {depth}: search UNRESOLVED "
-                            "(backend did not decide) -- the path space is NOT "
-                            "proven exhausted")
+                            f"({why}) -- the path space is NOT proven exhausted")
                     else:
                         decided.append(depth)
                         printer.print_normal(
@@ -271,6 +329,25 @@ class DiscretePathEnum(Algorithm):
                     break
 
                 assn = oracle.model()
+                # Guard the word before pooling or blocking. A model whose mode
+                # values do not spell an integral word cannot be excluded (the
+                # block would miss the word the solver satisfied and the next
+                # call may return the same model), and a mode word is exactly
+                # what this strategy pools -- so the model is dropped, the depth
+                # stops, and the run continues on the remaining depths.
+                word = _location_word(assn)
+                bad = _off_lattice(word)
+                if not word or bad:
+                    unresolved = True
+                    what = (", ".join(bad) if bad
+                            else "no currentMode_k variables in the model")
+                    printer.print_normal(
+                        f"[kappa_path] depth {depth}: cannot block this model "
+                        f"({what}); the model is not pooled and the depth "
+                        "stops UNRESOLVED -- the path space is NOT proven "
+                        "exhausted")
+                    break
+
                 if not pool:
                     first_depth = depth
                 pool.append({v: c for v, c in assn.items() if v not in auxiliary})
