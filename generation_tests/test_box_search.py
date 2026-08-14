@@ -7,7 +7,9 @@ should hold independently of which backend answers the queries and of whether a
 particular benchmark happens to exercise them.
 """
 
+from collections import Counter as _Counter
 from fractions import Fraction
+from time import sleep as _sleep
 
 from conftest import FakeOracle, beyond, covers, probe_at
 
@@ -17,14 +19,16 @@ from stlmc.generation.box import (
     _DEEP,
     _DOMAIN,
     RegionBoxDiscovery,
+    _binding_bound,
     _block_box,
     _merge_markers,
     _Theta,
     _too_close,
     _value_of,
     _verdict,
+    _WordRotation,
 )
-from stlmc.generation.oracle import UNKNOWN
+from stlmc.generation.oracle import SAT, UNKNOWN, UNSAT
 
 TRUE = BoolVal("True")
 
@@ -502,3 +506,292 @@ class _SilentPrinter:
 
     def print_verbose(self, *_a, **_k):
         pass
+
+# ================================================== the pruning policy itself
+
+class TestWordRotation:
+    """word-rotate is a policy over candidate verdicts, and only a refutation
+    is one.
+
+    The oracle's UNKNOWN carries no information about the query that produced
+    it, so an expired per-candidate bound says the candidate was expensive, not
+    that its mode word is infeasible. Counting it as a rejection discards a word
+    for a solver reason -- measured doing exactly that on a goal whose published
+    counterexample lives at the discarded word's depth.
+    """
+
+    def test_consecutive_refutations_drop_the_word(self):
+        rotation = _WordRotation(3)
+        assert [rotation.refuted("0112") for _ in range(3)] == [False, False, True]
+        assert rotation.dropped == 1
+
+    def test_undecided_candidates_never_drop_a_word(self):
+        rotation = _WordRotation(3)
+        for _ in range(100):
+            rotation.undecided_candidate()
+        assert rotation.dropped == 0
+        assert rotation.undecided == 100
+
+    def test_undecided_candidates_do_not_advance_the_streak(self):
+        """The distinction the fix is about: fifty expiries and two refutations
+        are two refutations."""
+        rotation = _WordRotation(3)
+        rotation.refuted("0112")
+        for _ in range(50):
+            rotation.undecided_candidate()
+        assert rotation.refuted("0112") is False
+        assert rotation.streak == 2
+        assert rotation.refuted("0112") is True
+
+    def test_undecided_candidates_do_not_reset_the_streak_either(self):
+        """An UNKNOWN is evidence in neither direction, so a run of refutations
+        continues across one rather than restarting."""
+        rotation = _WordRotation(2)
+        rotation.refuted("0112")
+        rotation.undecided_candidate()
+        assert rotation.refuted("0112") is True
+
+    def test_a_different_word_restarts_the_streak(self):
+        rotation = _WordRotation(2)
+        assert rotation.refuted("aa") is False
+        assert rotation.refuted("bb") is False
+        assert rotation.refuted("bb") is True
+
+    def test_the_counter_resets_after_a_drop(self):
+        """One word is reported once per run of refutations, not once per
+        refutation past the limit."""
+        rotation = _WordRotation(2)
+        for _ in range(4):
+            rotation.refuted("aa")
+        assert rotation.dropped == 2
+
+    def test_zero_disables_the_heuristic(self):
+        rotation = _WordRotation(0)
+        assert not any(rotation.refuted("0112") for _ in range(100))
+        assert rotation.dropped == 0
+
+    def test_a_candidate_with_no_word_is_never_counted(self):
+        rotation = _WordRotation(1)
+        assert rotation.refuted("") is False
+        assert rotation.dropped == 0
+
+
+# ============================================== which bound the search hit
+
+class TestBindingBound:
+    """A budget-exhausted search must name the key that actually bounded it.
+
+    Both directions were measured: a search whose candidates expired at
+    pivot-timeout, and one that refuted 972 candidates at ~0.1 s each until
+    pivot-budget ran out. Raising the wrong one of the two makes each case
+    strictly worse.
+    """
+
+    def test_expiries_that_consumed_the_search_name_pivot_timeout(self):
+        key, why = _binding_bound(41, 11, 30, 1790.0, 1800.0)
+        assert key == "pivot-timeout"
+        assert "30 of 41" in why
+
+    def test_fast_refutations_name_pivot_budget(self):
+        key, why = _binding_bound(972, 972, 0, 0.0, 1800.0)
+        assert key == "pivot-budget"
+        assert "972 candidate(s)" in why
+
+    def test_a_few_expiries_in_a_long_search_still_name_the_budget(self):
+        key, _ = _binding_bound(900, 895, 5, 300.0, 1800.0)
+        assert key == "pivot-budget"
+
+    def test_a_search_that_decided_nothing_at_all_names_the_budget(self):
+        """No candidate reached a verdict and none expired: nothing points at
+        the per-call bound."""
+        assert _binding_bound(0, 0, 0, 0.0, 120.0)[0] == "pivot-budget"
+
+
+# ====================================================== the two-step search
+
+class _ScriptedSkeleton:
+    """The outer solver of the two-step pivot search, with its answers given.
+
+    It proposes one location word per check, from a script, and answers UNSAT
+    once the script is spent (``forever`` repeats the last word instead). Every
+    assertion is recorded, which is how a test sees whether a mode-word block --
+    the rotation heuristic's only effect on the search -- was ever posted."""
+
+    def __init__(self, words, forever=False):
+        self._words = list(words)
+        self._forever = forever
+        self.asserted = []
+        self._model = None
+
+    def assert_(self, formula):
+        self.asserted.append(formula)
+
+    def check(self):
+        if not self._words:
+            self._model = None
+            return UNSAT
+        self._model = self._words[0] if self._forever else self._words.pop(0)
+        return SAT
+
+    def model(self):
+        return {Real(f"currentMode_{k}"): RealVal(str(digit))
+                for k, digit in enumerate(self._model)}
+
+
+class _ScriptedCandidate:
+    """The inner ODE-feasibility oracle for one candidate, with its verdict and
+    its cost given. ``cost`` is what the search charges against pivot-budget, so
+    a test can decide whether expiries dominate the search or not."""
+
+    def __init__(self, verdict, cost=0.0):
+        self.verdict = verdict
+        self.cost = cost
+
+    def set_budget(self, _seconds):
+        pass
+
+    def assert_(self, _formula):
+        pass
+
+    def check(self):
+        if self.cost:
+            _sleep(self.cost)
+        return self.verdict
+
+    def model(self):
+        return {}
+
+
+class _ScriptedTwoStep(RegionBoxDiscovery):
+    """kappa_box with both pivot-search oracles given explicitly.
+
+    `_pivot_two_step` is otherwise reachable only through a delta backend on a
+    nonlinear model, which would measure dReal rather than the search. The two
+    oracle seams keep the verdict handling -- which is all the search decides on
+    its own -- testable here."""
+
+    def __init__(self, words, verdicts, forever=False, cost=0.0):
+        super().__init__()
+        self.skeleton = _ScriptedSkeleton(words, forever=forever)
+        self._verdicts = list(verdicts)
+        self._cost = cost
+        self.candidates = []
+
+    def _skeleton_oracle(self, logic, seed):
+        return self.skeleton
+
+    def _candidate_oracle(self, logic, seed):
+        verdict = self._verdicts.pop(0) if self._verdicts else UNSAT
+        oracle = _ScriptedCandidate(verdict, self._cost)
+        self.candidates.append(oracle)
+        return oracle
+
+
+class _Section:
+    def __init__(self, values):
+        self._values = values
+
+    def is_argument_in(self, key):
+        return key in self._values
+
+    def get_value(self, key):
+        return self._values[key]
+
+
+class _GenConfig:
+    """Just the [gen] section, so a search's budgets are given rather than
+    read from a benchmark. Keys are written with underscores and read with
+    hyphens."""
+
+    def __init__(self, **gen):
+        self._gen = _Section({k.replace("_", "-"): v for k, v in gen.items()})
+
+    def is_section_in(self, name):
+        return name == "gen"
+
+    def get_section(self, name):
+        if name != "gen":
+            raise KeyError(name)
+        return self._gen
+
+
+class _Encoding:
+    """The two-step search reads only these three fields off an encoding."""
+
+    skeleton = BoolVal("True")
+    consts = BoolVal("True")
+    bound = 0
+
+
+def _two_step(words, verdicts, forever=False, cost=0.0, **gen):
+    """Run one candidate search against scripted oracles; returns the algorithm
+    (for its counters) and the search's own result."""
+    alg = _ScriptedTwoStep(words, verdicts, forever=forever, cost=cost)
+    alg._printer = _SilentPrinter()
+    alg._config = _GenConfig(**gen)
+    alg._logger = None
+    alg._tau_max = "8"
+    alg._underlying = "dreal"
+    alg._time_horizon = 8.0
+    alg._metrics = _Counter()
+    return alg, alg._pivot_two_step(_Encoding(), "LRA", 0, [])
+
+
+class TestTwoStepCandidateLoop:
+    """What the candidate loop does with each verdict.
+
+    The oracles are scripted rather than real: the search's own decisions are
+    which verdicts advance the heuristic and what it reports on giving up, and
+    neither depends on a solver.
+    """
+
+    def test_refutations_rotate_the_word_off(self):
+        alg, _ = _two_step(["0112"] * 40, [UNSAT] * 40,
+                           word_rotate=5, pivot_budget=30)
+        assert alg._rotated_words == 8, "one drop per five refutations"
+
+    def test_expiries_on_one_word_never_rotate_it_off(self):
+        """The measured defect: thirty consecutive pivot-timeout expiries on
+        word 0112 discarded it as if refuted."""
+        alg, _ = _two_step(["0112"] * 40, [UNKNOWN] * 40, pivot_budget=30)
+        assert alg._rotated_words == 0
+        assert alg._undecided_candidates == 40
+
+    def test_the_same_count_of_refutations_does_rotate(self):
+        """The contrast that makes the previous test about the verdict and not
+        about the count."""
+        alg, _ = _two_step(["0112"] * 40, [UNSAT] * 40, pivot_budget=30)
+        assert alg._rotated_words == 1
+
+    def test_expiries_do_not_interrupt_a_run_of_refutations(self):
+        alg, _ = _two_step(["0112"] * 6,
+                           [UNSAT, UNKNOWN, UNSAT, UNKNOWN, UNSAT, UNKNOWN],
+                           word_rotate=3, pivot_budget=30)
+        assert alg._rotated_words == 1
+        assert alg._undecided_candidates == 3
+
+    def test_an_accepted_candidate_returns_its_oracle(self):
+        alg, (oracle, model, encoding) = _two_step(
+            ["0112"] * 3, [UNSAT, UNSAT, SAT], pivot_budget=30)
+        assert oracle is alg.candidates[-1]
+        assert model is not None and encoding is not None
+        assert alg._metrics["accepted"] == 1
+
+    def test_an_undecided_candidate_is_still_blocked(self):
+        """It has to be, or z3 proposes it again forever; the loop must make
+        progress. What that costs is the exhaustion claim, not termination."""
+        alg, _ = _two_step(["0112"] * 4, [UNKNOWN] * 4, pivot_budget=30)
+        assert len(alg.candidates) == 4, "each expiry was followed by another"
+
+    def test_a_fast_refuting_search_blames_the_budget(self):
+        alg, (oracle, _, _) = _two_step(
+            ["0112"], [UNSAT] * 10_000, forever=True, pivot_budget=0.05)
+        assert oracle is None
+        assert alg._pivot_giveup[0] == "pivot-budget"
+
+    def test_a_search_spent_on_expiries_blames_the_per_call_bound(self):
+        alg, (oracle, _, _) = _two_step(
+            ["0112"], [UNKNOWN] * 10, forever=True, cost=0.04,
+            pivot_budget=0.05)
+        assert oracle is None
+        assert alg._pivot_giveup[0] == "pivot-timeout"
