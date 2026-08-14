@@ -354,33 +354,32 @@ class dRealSolver(ParallelSMTSolver):
 
     def parallel_check_sat(self, main_queue: Queue, sema: threading.Semaphore, proc: subprocess.Popen):
         stdout, stderr = proc.communicate()
-        stdout_str = stdout.decode()[len("Solution:\n"):-1]
+        stdout_dec = stdout.decode()
+        stdout_str = stdout_dec[len("Solution:\n"):-1]
         stderr_str = stderr.decode()
-        output_str = "{}\n{}".format(stdout_str, stderr_str)
-        # print(f'[exited with {proc.returncode}]')
-        # if stdout:
-        #     print(f'[stdout]\n{stdout.decode()}')
-        # if stderr:
-        #     print(f'[stderr]\n{stderr.decode()}')
 
-        # if os.path.isfile(model_file_name):
-        #    os.remove(model_file_name)
-
-        if "currentMode" in output_str:
-            result = "False"
-        elif "unsat" in stdout.decode():
+        # Classification is gated on the exit status. A non-zero exit (a parse
+        # error, a crash, a kill) yields no verdict, whatever the process
+        # printed: an error transcript that quotes the encoding necessarily
+        # contains "currentMode", and classifying it as satisfiable hands the
+        # caller a "model" parsed from an error message. The marker test is
+        # kept, but on stdout only (the solution box), and only on exit 0.
+        if proc.returncode != 0:
+            result = "Unknown"
+        elif "unsat" in stdout_dec:
             result = "True"
+        elif "currentMode" in stdout_dec:
+            result = "False"
         else:
             result = "Unknown"
 
         cont_var_list = stdout_str.split("\n")
         bool_var_list = stderr_str.split("\n")
 
-        result_model = list()
-        result_model.extend(cont_var_list)
-        result_model.extend(bool_var_list)
-
-        result_model.remove("")
+        # Filter every blank line: .remove("") dropped only the first and
+        # raised ValueError when the transcript had none.
+        result_model = [line for line in cont_var_list + bool_var_list
+                        if line != ""]
         main_queue.put((result, DrealAssignment(result_model), id(proc)))
         sema.release()
 
@@ -444,7 +443,6 @@ class dRealSolver(ParallelSMTSolver):
         self.set_time("solving timer", logger.get_duration_time("solving timer"))
         stdout_str = stdout.decode()[len("Solution:\n"):-1]
         stderr_str = stderr.decode()
-        output_str = "{}\n{}".format(stdout_str, stderr_str)
         # print(f'[exited with {proc.returncode}]')
         # if stdout:
         #     print(f'[stdout]\n{stdout.decode()}')
@@ -454,21 +452,19 @@ class dRealSolver(ParallelSMTSolver):
         if os.path.isfile(model_file_name):
             os.remove(model_file_name)
 
-        if "currentMode" in output_str:
-            result = "False"
+        # Same classification rule as parallel_check_sat: exit status gates,
+        # "unsat" then the solution-box marker decide, stdout only.
+        if proc.returncode != 0:
+            return "Unknown", None
+        if "unsat" in stdout.decode():
+            return "True", None
+        if "currentMode" in stdout.decode():
             cont_var_list = stdout_str.split("\n")
             bool_var_list = stderr_str.split("\n")
-
-            result_model = list()
-            result_model.extend(cont_var_list)
-            result_model.extend(bool_var_list)
-
-            result_model.remove("")
-            return result, result_model
-        elif "unsat" in stdout.decode():
-            return "True", None
-        else:
-            return "Unknown", None
+            result_model = [line for line in cont_var_list + bool_var_list
+                            if line != ""]
+            return "False", result_model
+        return "Unknown", None
 
     def solve(self, all_consts=None, info_dict=None, boolean_abstract=None):
         self._cache.clear()
