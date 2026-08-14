@@ -72,15 +72,26 @@ def gen_int(config, key: str):
 
 
 def gen_float(config, key: str):
-    """A float ``[gen]`` value, or None when absent, empty or zero.
+    """A float ``[gen]`` value, or None when absent or empty.
 
-    Zero folds into None because every caller uses this for a positive budget
-    whose "off" setting is 0.
+    A configured 0 is returned as 0.0, NOT folded into None: with the fold,
+    five keys silently replaced a configured 0 with their default and the run
+    banner printed the default back as if it had been set. What a zero means
+    (off, or a configuration error) is the caller's decision -- see
+    :func:`validate_gen`.
     """
     value = _gen_value(config, key)
-    if value in (None, "", "0"):
+    if value in (None, ""):
         return None
     return float(value)
+
+
+def gen_present(config, key: str) -> bool:
+    """Whether ``key`` is set in ``[gen]`` at all, without parsing its value.
+
+    The presence check for removed/renamed keys: parsing would crash on a
+    boolean-shaped stale value (``int("true")``) before the warning prints."""
+    return _gen_value(config, key) is not None
 
 
 def gen_frac(config, key: str, default: str) -> Fraction:
@@ -138,7 +149,9 @@ def _check_depths(key: str, raw: str) -> None:
 
 
 def _check_query_timeout(key: str, raw: str) -> None:
-    if str(raw).strip() in ("0", "off", "none"):
+    # Section.get_value strips quotes from real configurations; the extra
+    # strip here keeps the check usable on raw test harness values too.
+    if str(raw).strip().strip('"') in ("", "0", "off", "none"):
         return
     try:
         sec = float(raw)
@@ -157,6 +170,55 @@ def _check_flag01(key: str, raw: str) -> None:
         raise ValueError(f'[gen] {key} = "{raw}": 0 or 1 is required')
 
 
+def _check_frac(key: str, raw: str) -> Fraction:
+    try:
+        return Fraction(str(raw).strip().strip('"'))
+    except (ValueError, ZeroDivisionError):
+        raise ValueError(
+            f'[gen] {key} = "{raw}": a number is required') from None
+
+
+def _check_positive_theta(key: str, raw: str) -> None:
+    if _check_frac(key, raw) <= 0:
+        raise ValueError(
+            f'[gen] {key} = "{raw}": must be > 0 -- theta is the growth '
+            'granularity, and at 0 the exact face search never terminates')
+
+
+def _check_unit_frac(key: str, raw: str) -> None:
+    value = _check_frac(key, raw)
+    if not (0 <= value < 1):
+        raise ValueError(
+            f'[gen] {key} = "{raw}": must be in [0, 1) (0 = off)')
+
+
+def _check_nonneg_frac(key: str, raw: str) -> None:
+    if _check_frac(key, raw) < 0:
+        raise ValueError(f'[gen] {key} = "{raw}": must be >= 0 (0 = off)')
+
+
+def _check_int_at_least(floor: int, note: str = ""):
+    def check(key: str, raw: str) -> None:
+        _check_int(key, raw)
+        if int(raw) < floor:
+            raise ValueError(
+                f'[gen] {key} = "{raw}": must be >= {floor}{note}')
+    return check
+
+
+def _check_positive_seconds(key: str, raw: str) -> None:
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ValueError(
+            f'[gen] {key} = "{raw}": a number of seconds is required') from None
+    if not value > 0 or value != value or value == float("inf"):
+        raise ValueError(
+            f'[gen] {key} = "{raw}": must be a finite number of seconds > 0 '
+            '-- these are the search budgets, and neither has an "off" '
+            'spelling')
+
+
 # Key -> check. Entries cover the keys kappa_path reads and the keys the
 # backends share; the sibling strategy registers its own keys here as they
 # gain validation. A key with no entry passes unchecked.
@@ -166,6 +228,23 @@ _GEN_KEY_CHECKS = {
     "depths": _check_depths,
     "query-timeout": _check_query_timeout,
     "keep-smt2": _check_flag01,
+    # kappa_box keys carry range checks as well as parse checks, because an
+    # out-of-range value has NO defined semantics there (unlike a negative
+    # radius, which folds with a notice): theta = 0 never terminates, a
+    # zero-box budget would decide a depth in zero solver calls, a negative
+    # word-rotate blocks a word on its first refutation.
+    "epsilon": _check_positive_theta,
+    "epsilon-relative": _check_unit_frac,
+    "thin-ic": _check_nonneg_frac,
+    "bisect-iters": _check_int_at_least(0, " (0 = face precision theta)"),
+    "k-witness": _check_int_at_least(1, " (the per-axis cell budget of the "
+                                        "lattice harvest, Def. 7: k >= 1)"),
+    "k-ic": _check_int_at_least(0, " (0 = no budget, explore each depth to "
+                                   "exhaustion)"),
+    "word-rotate": _check_int_at_least(0, " (0 = off)"),
+    "log-every": _check_int_at_least(1),
+    "pivot-budget": _check_positive_seconds,
+    "pivot-timeout": _check_positive_seconds,
 }
 
 
