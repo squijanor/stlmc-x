@@ -46,11 +46,21 @@ class ConfigVisitor(configVisitor):
         self.type_check_dict["gen"] = {
             ("radius", "integer"),
             ("epsilon", "float"),
+            ("epsilon-relative", "float"),
             ("maxexp", "integer"),
             ("k-paths", "integer"),
             ("k-ic", "integer"),
+            ("k-witness", "integer"),
             ("thin-ic", "float"),
             ("bisect-iters", "integer"),
+            ("word-rotate", "integer"),
+            ("pivot-budget", "float"),
+            ("pivot-timeout", "float"),
+            ("log-every", "integer"),
+            ("harvest", frozenset({"lattice", "sweep"})),
+            # query-timeout is deliberately absent: it accepts the words
+            # "off"/"none" as well as numbers, which this type system cannot
+            # express; the generation strategies validate it at run start.
         }
 
         self.section_boolean_argument_dict["common"] = {"two-step", "parallel", "visualize", "verbose", "reach", "only-loop"}
