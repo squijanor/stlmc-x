@@ -92,7 +92,20 @@ def query_timeout(config):
         return DEFAULT_QUERY_TIMEOUT
     if str(sec).strip() in ("0", "off", "none"):
         return None
-    return float(sec)
+    try:
+        value = float(sec)
+    except ValueError:
+        raise ValueError(
+            f'[gen] query-timeout = "{sec}": a number of seconds is required '
+            '(0, "off" or "none" disables the per-call bound)') from None
+    if value != value or value in (float("inf"), float("-inf")) or value < 0:
+        # A negative value previously unbounded z3 silently (the constructor's
+        # `> 0` guard skipped the bound with no notice) and crashed the dReal
+        # path in Queue.get(timeout<0) after the subprocess had spawned.
+        raise ValueError(
+            f'[gen] query-timeout = "{sec}": a finite number of seconds >= 0 '
+            'is required (0, "off" or "none" disables the per-call bound)')
+    return value
 
 
 # =========================================================================== #
@@ -139,6 +152,14 @@ class GrowthOracle(abc.ABC):
 
     @abc.abstractmethod
     def model(self) -> dict[Variable, Constant]: ...
+
+    def unknown_reason(self) -> str | None:
+        """Best-effort explanation of the most recent UNKNOWN, or None.
+
+        Purely diagnostic: a caller uses it to say *why* a search was left
+        unresolved (a per-call query-timeout expiry reads very differently
+        from a solver give-up), never to reclassify a verdict."""
+        return None
 
     def check_with(self, formula: Formula) -> str:
         """SAT-check the current stack conjoined with ``formula``, leaving the
@@ -195,7 +216,21 @@ class Z3IncrementalOracle(GrowthOracle):
             self._sat_seen = True
             return SAT
         self._sat_seen = False
-        return UNSAT if r == z3.unsat else UNKNOWN
+        if r == z3.unsat:
+            return UNSAT
+        # Read the reason now: it is valid only until the next check().
+        try:
+            self._unknown_reason = str(self._solver.reason_unknown())
+        except Exception:
+            self._unknown_reason = None
+        return UNKNOWN
+
+    def unknown_reason(self) -> str | None:
+        reason = getattr(self, "_unknown_reason", None)
+        # z3 reports a per-call bound expiry as "timeout" or "canceled".
+        if reason in ("timeout", "canceled"):
+            return "z3 hit the per-call [gen] query-timeout"
+        return f"z3: {reason}" if reason else None
 
     def model(self) -> dict[Variable, Constant]:
         if not self._sat_seen:
@@ -267,13 +302,21 @@ class DrealReSolveOracle(GrowthOracle):
         return And(flat)
 
     def check(self) -> str:
+        self._unknown_reason = None
         result, model = self._solve_once(self._all_consts())
         # Translate the wrapped solver's verdict to native (see module docstring).
         if result == "False":
             self._last_model = model
             return SAT
         self._last_model = None
-        return UNSAT if result == "True" else UNKNOWN
+        if result == "True":
+            return UNSAT
+        if self._unknown_reason is None:
+            self._unknown_reason = "dReal did not decide"
+        return UNKNOWN
+
+    def unknown_reason(self) -> str | None:
+        return getattr(self, "_unknown_reason", None)
 
     def model(self) -> dict[Variable, Constant]:
         if self._last_model is None:
@@ -329,12 +372,15 @@ class DrealReSolveOracle(GrowthOracle):
 
         # process() writes its SMT2 under ./dreal_log/ and NEVER removes it.
         # Upstream's sync path removes the file; the parallel path keeps it
-        # sized for a handful of calls per run. kappa_box issues thousands, so
-        # without cleanup this grows without bound (tens of thousands of files
-        # in one session). Give each call its own subdirectory and drop it after.
-        # [gen] keep-smt2 = 1 retains them for diagnosis.
+        # sized for a handful of calls per run. The generation strategies issue
+        # thousands, so without cleanup this grows without bound (tens of
+        # thousands of files in one session). Give each call its own
+        # subdirectory and drop it after. [gen] keep-smt2 = 1 retains them for
+        # diagnosis. The token is strategy-neutral: this oracle serves every
+        # generation strategy, and a diagnosis session should not find a
+        # kappa_path run's queries filed under the sibling's name.
         DrealReSolveOracle._smt2_seq += 1
-        token = f"kbox_{os.getpid()}_{DrealReSolveOracle._smt2_seq}"
+        token = f"gen_{os.getpid()}_{DrealReSolveOracle._smt2_seq}"
         solver.set_file_name(token)
         try:
             keep = str(self._config.get_section("gen").get_value("keep-smt2")) == "1"
@@ -359,6 +405,8 @@ class DrealReSolveOracle(GrowthOracle):
             except Exception:
                 pass
             self.timeouts += 1
+            self._unknown_reason = (
+                f"dReal exceeded the per-call [gen] query-timeout ({budget}s)")
             _drop()
             return "Unknown", None
         model = assignment.get_assignments() if result == "False" else None
