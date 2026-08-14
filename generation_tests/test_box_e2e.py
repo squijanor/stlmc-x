@@ -225,3 +225,27 @@ def test_a_restricted_run_never_claims_absence_up_to_the_bound(tmp_path):
     stdout, _ = run_box(tmp_path, extra="depths = 1")
     assert "result : True" not in stdout, (
         "claimed absence up to the bound while skipping depth 2\n" + stdout)
+
+def test_a_zero_box_budget_is_no_budget_not_an_instant_true(tmp_path):
+    """[gen] k-ic = 0 spells "off", like the section's other keys.
+
+    The defect: 0 made the per-depth loop guard false before the first solver
+    call, no depth was decided, and the run reported True in under a
+    millisecond on a goal that falsifies. 0 must mean "no budget" (explore the
+    depth to exhaustion), so this run has to find the counterexample.
+    """
+    stdout, pool = run_box(tmp_path, extra="depths = 2\n    k-ic = 0")
+    assert "result : False" in stdout, stdout
+    assert pool is not None
+
+
+def test_zero_epsilon_fails_fast_with_the_key_named(tmp_path):
+    """[gen] epsilon = 0 must be rejected before the first solver call.
+
+    The defect: theta = 0 made the face bisection's termination condition
+    unreachable over exact rationals, so the run hung inside the first face
+    search at one solver call per iteration -- a silent hang, not an error.
+    """
+    stdout, pool = run_box(tmp_path, epsilon=0)
+    assert "[gen] epsilon" in stdout and "must be > 0" in stdout, stdout
+    assert pool is None
