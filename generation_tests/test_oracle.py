@@ -140,3 +140,100 @@ class TestZ3Enforcement:
         oracle = Z3IncrementalOracle("QF_NRA", seed=0, timeout=0.05)
         oracle.assert_(semiprime_query())
         assert oracle.check() == UNKNOWN
+
+
+# ============================================================== diagnostics
+
+class TestUnknownReason:
+    """An UNRESOLVED report should say why: a per-call bound expiry reads very
+    differently from a solver give-up. The hook is diagnostic only -- callers
+    never reclassify a verdict from it."""
+
+    def test_a_bound_expiry_names_the_query_timeout(self):
+        oracle = Z3IncrementalOracle("QF_NRA", seed=0, timeout=0.05)
+        oracle.assert_(semiprime_query())
+        assert oracle.check() == UNKNOWN
+        assert "query-timeout" in oracle.unknown_reason()
+
+    def test_a_dreal_budget_expiry_names_the_query_timeout(self, monkeypatch):
+        oracle = DrealReSolveOracle(FakeConfig(**{"query-timeout": "60"}))
+
+        def expired(consts):
+            oracle.timeouts += 1
+            oracle._unknown_reason = (
+                "dReal exceeded the per-call [gen] query-timeout (60s)")
+            return "Unknown", None
+
+        monkeypatch.setattr(oracle, "_solve_once", expired)
+        assert oracle.check() == UNKNOWN
+        assert "query-timeout" in oracle.unknown_reason()
+
+    def test_a_dreal_give_up_reports_a_generic_reason(self, monkeypatch):
+        oracle = DrealReSolveOracle(FakeConfig(**{"query-timeout": "60"}))
+        monkeypatch.setattr(oracle, "_solve_once",
+                            lambda consts: ("Unknown", None))
+        assert oracle.check() == UNKNOWN
+        assert oracle.unknown_reason() == "dReal did not decide"
+
+
+# =========================================================== classification
+
+class FakeProc:
+    """A finished subprocess: exit status and captured streams."""
+
+    def __init__(self, returncode, stdout, stderr):
+        self.returncode = returncode
+        self._stdout = stdout.encode()
+        self._stderr = stderr.encode()
+
+    def communicate(self):
+        return self._stdout, self._stderr
+
+
+def classify(returncode, stdout, stderr):
+    """Run dRealSolver.parallel_check_sat over a fake finished process."""
+    import queue
+    import threading
+
+    from stlmc.solver.dreal import dRealSolver
+
+    solver = dRealSolver.__new__(dRealSolver)  # the method touches no state
+    main_queue: queue.Queue = queue.Queue()
+    dRealSolver.parallel_check_sat(solver, main_queue, threading.Semaphore(0),
+                                   FakeProc(returncode, stdout, stderr))
+    result, assignment, _ = main_queue.get_nowait()
+    return result, assignment
+
+
+class TestDrealClassification:
+    """The verdict is gated on the exit status. An error transcript that quotes
+    the encoding necessarily contains "currentMode"; before the gate it was
+    classified as satisfiable, and the caller pooled a "model" parsed from an
+    error message before crashing on it."""
+
+    SAT_OUT = "Solution:\ncurrentMode_0 : Int = [1, 1]\nx_0_0 : [0.5, 0.6]\n"
+
+    def test_a_clean_solution_is_satisfiable(self):
+        result, assignment = classify(0, self.SAT_OUT, "b@goal : Bool = true\n")
+        assert result == "False"
+        assert assignment._dreal_model
+
+    def test_a_clean_unsat_is_unsatisfiable(self):
+        assert classify(0, "unsat\n", "")[0] == "True"
+
+    def test_an_error_transcript_is_no_verdict(self):
+        result, _ = classify(1, "", "parse error near '(= currentMode_0 1)'\n")
+        assert result == "Unknown"
+
+    def test_a_killed_process_is_no_verdict(self):
+        assert classify(-9, "", "")[0] == "Unknown"
+
+    def test_a_clean_exit_with_no_recognisable_output_is_no_verdict(self):
+        assert classify(0, "something else", "")[0] == "Unknown"
+
+    def test_a_transcript_without_a_blank_line_does_not_crash(self):
+        """.remove("") raised ValueError when the transcript had none."""
+        result, assignment = classify(
+            0, "Solution:\ncurrentMode_0 : Int = [1, 1]", "no-newline")
+        assert result == "False"
+        assert assignment._dreal_model
