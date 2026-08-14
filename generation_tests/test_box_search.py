@@ -21,6 +21,7 @@ from stlmc.generation.box import (
     RegionBoxDiscovery,
     _binding_bound,
     _block_box,
+    _box_budget,
     _merge_markers,
     _Theta,
     _too_close,
@@ -28,6 +29,7 @@ from stlmc.generation.box import (
     _verdict,
     _WordRotation,
 )
+from stlmc.generation.common import gen_float, validate_gen
 from stlmc.generation.oracle import SAT, UNKNOWN, UNSAT
 
 TRUE = BoolVal("True")
@@ -418,13 +420,59 @@ class TestHarvestLattice:
         assert undecided > 0
         assert len(got) + undecided == requested
 
-    def test_a_degenerate_axis_yields_nothing(self, x, y):
+    def test_a_degenerate_axis_contributes_one_cell(self, x, y):
+        """Def. 7: c_j >= 1 -- "an axis narrower than theta contributes one
+        cell, never none". The defect gave a zero-span axis zero cells and
+        returned an empty harvest for the WHOLE box, silently: the pool was
+        pivot + markers and k-witness was inert whenever one face never grew
+        (unresolved both ways, or an IC pinned by the model)."""
         alg = RegionBoxDiscovery()
         box = {x: [Fraction(1), Fraction(1)], y: [Fraction(0), Fraction(1)]}
         theta = _Theta(Fraction(1, 4))
         oracle = FakeOracle({x: (Fraction(0), Fraction(10)),
                              y: (Fraction(0), Fraction(10))})
-        assert alg._harvest_lattice(oracle, box, theta, 8, 200) == ([], 0, 0)
+        got, requested, undecided = alg._harvest_lattice(
+            oracle, box, theta, 8, 200)
+        assert requested == 4, "1 cell on the pinned axis x 4 on the live one"
+        assert len(got) == 4
+        for witness in got:
+            assert abs(_value_of(witness, x) - 1) <= Fraction(1, 8), (
+                "the degenerate axis samples at its pivot value +/- theta/2")
+
+    def test_the_cap_reduction_does_not_compound(self):
+        """Greedy one-cell decrements, not a uniform floored shrink: five axes
+        at 3 cells (243) under a 200 cap must stop at 162 (3^4 x 2), not
+        collapse to 2^5 = 32."""
+        alg = RegionBoxDiscovery()
+        axes = [Real(f"v{i}_0_0") for i in range(5)]
+        box = {v: [Fraction(0), Fraction(3, 4)] for v in axes}
+        theta = _Theta(Fraction(1, 4))            # 3 cells per axis uncapped
+        oracle = FakeOracle({v: (Fraction(0), Fraction(10)) for v in axes})
+        _, requested, _ = alg._harvest_lattice(oracle, box, theta, 8, 200)
+        assert requested == 162
+
+    def test_the_cap_reduction_is_reported(self, x, y):
+        """The docstring promised a report and none was printed: a capped
+        harvest read as "covered everything", against the no-silent-caps
+        rule. The line carries before, after, and per-axis counts."""
+        class _Recorder:
+            lines = []
+
+            def print_normal(self, msg):
+                self.lines.append(msg)
+
+            def print_verbose(self, msg):
+                self.lines.append(msg)
+        alg = RegionBoxDiscovery()
+        alg._printer = _Recorder()
+        box = {x: [Fraction(0), Fraction(1)], y: [Fraction(0), Fraction(1)]}
+        theta = _Theta(Fraction(1, 100))          # 100 x 100 uncapped
+        oracle = FakeOracle({x: (Fraction(0), Fraction(10)),
+                             y: (Fraction(0), Fraction(10))})
+        _, requested, _ = alg._harvest_lattice(oracle, box, theta, 100, 50)
+        assert requested <= 50
+        capped = [line for line in _Recorder.lines if "lattice capped" in line]
+        assert capped and "10000" in capped[0]
 
 
 # ====================================================== the shared procedure
@@ -641,17 +689,36 @@ class _ScriptedSkeleton:
 class _ScriptedCandidate:
     """The inner ODE-feasibility oracle for one candidate, with its verdict and
     its cost given. ``cost`` is what the search charges against pivot-budget, so
-    a test can decide whether expiries dominate the search or not."""
+    a test can decide whether expiries dominate the search or not.
+
+    Frames are real: the search asserts the region blocks in a pushed frame so
+    that the pivot query sees them and the growth queries (which reuse this
+    oracle) do not. ``asserted`` records everything ever asserted; ``live``
+    is what a growth query issued after the search returned would still see."""
 
     def __init__(self, verdict, cost=0.0):
         self.verdict = verdict
         self.cost = cost
+        self.asserted = []
+        self.budgets = []
+        self._frames = [[]]
 
-    def set_budget(self, _seconds):
-        pass
+    def set_budget(self, seconds):
+        self.budgets.append(seconds)
 
-    def assert_(self, _formula):
-        pass
+    def assert_(self, formula):
+        self.asserted.append(formula)
+        self._frames[-1].append(formula)
+
+    def push(self):
+        self._frames.append([])
+
+    def pop(self):
+        self._frames.pop()
+
+    @property
+    def live(self):
+        return [f for frame in self._frames for f in frame]
 
     def check(self):
         if self.cost:
@@ -723,7 +790,7 @@ class _Encoding:
     bound = 0
 
 
-def _two_step(words, verdicts, forever=False, cost=0.0, **gen):
+def _two_step(words, verdicts, forever=False, cost=0.0, blocks=(), **gen):
     """Run one candidate search against scripted oracles; returns the algorithm
     (for its counters) and the search's own result."""
     alg = _ScriptedTwoStep(words, verdicts, forever=forever, cost=cost)
@@ -734,7 +801,7 @@ def _two_step(words, verdicts, forever=False, cost=0.0, **gen):
     alg._underlying = "dreal"
     alg._time_horizon = 8.0
     alg._metrics = _Counter()
-    return alg, alg._pivot_two_step(_Encoding(), "LRA", 0, [])
+    return alg, alg._pivot_two_step(_Encoding(), "LRA", 0, list(blocks))
 
 
 class TestTwoStepCandidateLoop:
@@ -795,3 +862,347 @@ class TestTwoStepCandidateLoop:
             pivot_budget=0.05)
         assert oracle is None
         assert alg._pivot_giveup[0] == "pivot-timeout"
+
+class TestSkeletonVerdictRecording:
+    """What the two-step search records when the outer solver stops it.
+
+    The distinction it must preserve is UNSAT (structure space exhausted)
+    against UNKNOWN (the skeleton solver gave up within its bound): the caller
+    routes the first to an absence claim and the second to an UNRESOLVED
+    report, so collapsing them turns a resource failure into a verdict.
+    """
+
+    def test_a_spent_structure_space_records_unsat(self):
+        alg, (oracle, _, _) = _two_step(["01"], [UNSAT], pivot_budget=30)
+        assert oracle is None
+        assert alg._last_pivot_verdict == UNSAT
+
+    def test_a_skeleton_give_up_records_unknown_not_unsat(self):
+        """The defect: an undecided skeleton solve was recorded as UNSAT, so
+        the run claimed exhaustion for a query z3 gave up on."""
+        alg = _ScriptedTwoStep([], [])
+        alg.skeleton.check = lambda: UNKNOWN
+        alg._printer = _SilentPrinter()
+        alg._config = _GenConfig(pivot_budget="30")
+        alg._logger = None
+        alg._tau_max = "8"
+        alg._underlying = "dreal"
+        alg._time_horizon = 8.0
+        alg._metrics = _Counter()
+        oracle, _, _ = alg._pivot_two_step(_Encoding(), "LRA", 0, [])
+        assert oracle is None
+        assert alg._last_pivot_verdict == UNKNOWN
+
+
+class TestBoxBudget:
+    """[gen] k-ic resolved to a per-depth budget: 0 spells off, like the
+    section's other keys, and never 'stop before the first solver call'."""
+
+    def test_absent_means_exhaust(self):
+        assert _box_budget(_GenConfig()) is None
+
+    def test_zero_means_exhaust_not_zero_boxes(self):
+        assert _box_budget(_GenConfig(k_ic="0")) is None
+
+    def test_a_positive_budget_is_kept(self):
+        assert _box_budget(_GenConfig(k_ic="3")) == 3
+
+    def test_a_negative_budget_is_a_configuration_error(self):
+        try:
+            _box_budget(_GenConfig(k_ic="-1"))
+        except ValueError as error:
+            assert "k-ic" in str(error)
+        else:
+            raise AssertionError("a negative k-ic must be rejected")
+
+
+class _ScriptedExact(RegionBoxDiscovery):
+    """kappa_box with the exact path's single-query oracle given explicitly,
+    so the block-frame discipline is testable without a solver."""
+
+    def __init__(self, verdict):
+        super().__init__()
+        self.oracle = _ScriptedCandidate(verdict)
+
+    def _exact_oracle(self, logic, seed):
+        return self.oracle
+
+
+class _OneDepthEncoder:
+    def encode_at(self, depth):
+        return _Encoding()
+
+
+class TestBlocksBindThePivotNotGrowth:
+    """Alg. 2: the pivot solves Enc conjoined with the negated blocks; every
+    growth query runs on Enc[w] alone. Kept permanently, the blocks wall in
+    the growth oracle and _search_face reads UNSAT at a block wall as a
+    bracketed frontier -- a `boundary` marker at an algorithmic wall (exact
+    path). Never asserted at all, the pivot the run uses can sit inside an
+    already-blocked box and regrow the same region (delta path). Both
+    backends must therefore frame the blocks around the pivot query alone.
+    """
+
+    def test_exact_pivot_sees_the_blocks(self):
+        block = _block_box({Real("x1_0_0"): (Fraction(0), Fraction(1))})
+        alg = _ScriptedExact(SAT)
+        alg._underlying = "z3"
+        alg._config = _GenConfig()
+        oracle, pivot, _ = alg._pivot_at(_OneDepthEncoder(), 0, "LRA", 0,
+                                         [block])
+        assert pivot is not None
+        assert any(f is block for f in oracle.asserted), (
+            "the pivot query must see the block")
+
+    def test_exact_growth_is_not_walled_by_the_blocks(self):
+        block = _block_box({Real("x1_0_0"): (Fraction(0), Fraction(1))})
+        alg = _ScriptedExact(SAT)
+        alg._underlying = "z3"
+        alg._config = _GenConfig()
+        oracle, _, _ = alg._pivot_at(_OneDepthEncoder(), 0, "LRA", 0, [block])
+        assert not any(f is block for f in oracle.live), (
+            "the block frame must be popped before the oracle grows the box")
+
+    def test_exact_no_pivot_still_pops_and_records_the_verdict(self):
+        for verdict in (UNSAT, UNKNOWN):
+            block = _block_box({Real("x1_0_0"): (Fraction(0), Fraction(1))})
+            alg = _ScriptedExact(verdict)
+            alg._underlying = "z3"
+            alg._config = _GenConfig()
+            oracle, pivot, _ = alg._pivot_at(_OneDepthEncoder(), 0, "LRA", 0,
+                                             [block])
+            assert pivot is None
+            assert alg._last_pivot_verdict == verdict
+            assert not any(f is block for f in alg.oracle.live)
+
+    def test_delta_candidate_sees_the_blocks(self):
+        """The defect on this backend was the opposite: the blocks reached
+        only the outer skeleton solver, whose candidate pins no reals, so the
+        pivot dReal returned could sit inside an already-blocked box."""
+        block = _block_box({Real("x1_0_0"): (Fraction(0), Fraction(1))})
+        alg, (oracle, model, _) = _two_step(["01"], [SAT], pivot_budget=30,
+                                            blocks=[block])
+        assert model is not None
+        assert any(f is block for f in oracle.asserted), (
+            "the candidate oracle chooses the pivot; the blocks must bind it")
+
+    def test_delta_growth_is_not_walled_by_the_blocks(self):
+        block = _block_box({Real("x1_0_0"): (Fraction(0), Fraction(1))})
+        alg, (oracle, _, _) = _two_step(["01"], [SAT], pivot_budget=30,
+                                        blocks=[block])
+        assert not any(f is block for f in oracle.live)
+
+
+class TestValidateGen:
+    """Range checks run before the first solver call.
+
+    Each rejected value previously failed late or silently: epsilon = 0 made
+    the exact bisection non-terminating and divided by zero in the harvest; a
+    negative query-timeout unbounded z3 silently and crashed dReal after the
+    subprocess was spawned; a negative word-rotate blocked a word on its
+    first refutation; pivot budgets of 0 were folded into their defaults and
+    the folded value printed back as if configured.
+    """
+
+    @staticmethod
+    def _rejects(**gen):
+        try:
+            validate_gen(_GenConfig(**gen))
+        except ValueError as error:
+            return str(error)
+        raise AssertionError(f"{gen} must be rejected")
+
+    def test_a_default_configuration_passes(self):
+        validate_gen(_GenConfig())
+
+    def test_a_populated_valid_configuration_passes(self):
+        validate_gen(_GenConfig(epsilon="0.001", epsilon_relative="0.01",
+                                k_ic="3", k_witness="8", word_rotate="0",
+                                pivot_budget="1800", pivot_timeout="60",
+                                query_timeout='"off"', bisect_iters="0",
+                                log_every="1", thin_ic="0"))
+
+    def test_zero_epsilon_is_rejected_with_the_reason(self):
+        assert "never terminates" in self._rejects(epsilon="0")
+
+    def test_negative_epsilon_is_rejected(self):
+        self._rejects(epsilon="-0.01")
+
+    def test_epsilon_relative_must_be_a_proper_fraction(self):
+        self._rejects(epsilon_relative="1")
+        self._rejects(epsilon_relative="-0.1")
+
+    def test_zero_pivot_budgets_are_rejected_not_folded(self):
+        assert "pivot-budget" in self._rejects(pivot_budget="0")
+        assert "pivot-timeout" in self._rejects(pivot_timeout="0")
+
+    def test_negative_word_rotate_is_rejected(self):
+        assert "word-rotate" in self._rejects(word_rotate="-1")
+
+    def test_zero_k_witness_is_rejected(self):
+        assert "k-witness" in self._rejects(k_witness="0")
+
+    def test_negative_query_timeout_is_rejected_but_off_is_not(self):
+        assert "query-timeout" in self._rejects(query_timeout="-5")
+        validate_gen(_GenConfig(query_timeout="0"))
+        validate_gen(_GenConfig(query_timeout='"off"'))
+
+    def test_gen_float_reports_a_configured_zero(self):
+        """The fold this class replaces: gen_float("0") must be 0.0, not the
+        caller's default."""
+        assert gen_float(_GenConfig(pivot_budget="0"), "pivot-budget") == 0.0
+        assert gen_float(_GenConfig(), "pivot-budget") is None
+
+
+class _DictSkeleton(_ScriptedSkeleton):
+    """A skeleton oracle whose models are given as dicts, for mode words the
+    char-per-step script cannot express (values >= 10, steps >= 10)."""
+
+    def __init__(self, models):
+        super().__init__(words=[])
+        self._models = list(models)
+
+    def check(self):
+        if not self._models:
+            self._model = None
+            return UNSAT
+        self._model = self._models.pop(0)
+        return SAT
+
+    def model(self):
+        return {Real(f"currentMode_{k}"): RealVal(str(v))
+                for k, v in self._model.items()}
+
+
+class TestModeWordIdentity:
+    """The rotation streak is keyed by the mode word, so the word must be a
+    faithful identity of the path: positional (sorted by step index, not by
+    id string) and separated (no digit-join ambiguity)."""
+
+    @staticmethod
+    def _run(models, **gen):
+        alg = _ScriptedTwoStep([], [])
+        alg.skeleton = _DictSkeleton(models)
+        alg._printer = _SilentPrinter()
+        alg._config = _GenConfig(**gen)
+        alg._logger = None
+        alg._tau_max = "8"
+        alg._underlying = "dreal"
+        alg._time_horizon = 8.0
+        alg._metrics = _Counter()
+        alg._pivot_two_step(_Encoding(), "LRA", 0, [])
+        return alg
+
+    def test_different_paths_never_share_a_streak(self):
+        """(1,12) and (11,2) both rendered "112" under the separator-free
+        join, so refutations of two different paths accumulated into one
+        streak and could rotate off a feasible word."""
+        alg = self._run([{0: 1, 1: 12}, {0: 11, 1: 2}] * 2,
+                        word_rotate=2, pivot_budget=30)
+        assert alg._rotated_words == 0, (
+            "alternating distinct words must never reach a streak of 2")
+
+    def test_the_same_path_still_accumulates(self):
+        alg = self._run([{0: 1, 1: 12}] * 2, word_rotate=2, pivot_budget=30)
+        assert alg._rotated_words == 1
+
+    def test_the_word_is_ordered_by_step_index(self):
+        """currentMode_10 sorts lexicographically before currentMode_2: the
+        printed word was non-positional from depth 10 up."""
+        recorded = []
+
+        class _Recorder:
+            def print_normal(self, msg):
+                recorded.append(msg)
+
+            def print_verbose(self, msg):
+                recorded.append(msg)
+
+        alg = _ScriptedTwoStep([], [])
+        alg.skeleton = _DictSkeleton([{2: 5, 10: 7}])
+        alg._printer = _Recorder()
+        alg._config = _GenConfig(pivot_budget="30")
+        alg._logger = None
+        alg._tau_max = "8"
+        alg._underlying = "dreal"
+        alg._time_horizon = 8.0
+        alg._metrics = _Counter()
+        alg._pivot_two_step(_Encoding(), "LRA", 0, [])
+        words = [line for line in recorded if "(word " in line]
+        assert words and "(word 5.7)" in words[0], words
+
+
+class TestPivotMetricsAndClamp:
+    def test_the_exact_pivot_counts_into_the_metrics(self):
+        """The metrics line printed candidates=0 accepted=0 on every exact
+        run: only the two-step search incremented the counters."""
+        alg = _ScriptedExact(SAT)
+        alg._underlying = "z3"
+        alg._config = _GenConfig()
+        alg._pivot_at(_OneDepthEncoder(), 0, "LRA", 0, [])
+        assert alg._metrics["candidates"] == 1
+        assert alg._metrics["accepted"] == 1
+
+    def test_a_refused_exact_pivot_counts_the_attempt_only(self):
+        alg = _ScriptedExact(UNSAT)
+        alg._underlying = "z3"
+        alg._config = _GenConfig()
+        alg._pivot_at(_OneDepthEncoder(), 0, "LRA", 0, [])
+        assert alg._metrics["candidates"] == 1
+        assert alg._metrics["accepted"] == 0
+
+    def test_the_candidate_budget_is_clamped_to_the_deadline(self):
+        """One candidate could overrun the search deadline by a whole
+        pivot-timeout: the per-candidate budget must never exceed what is
+        left of pivot-budget."""
+        alg, _ = _two_step(["01"], [UNSAT] * 100, forever=True,
+                           pivot_budget=0.2, pivot_timeout=45)
+        numeric = [b for oracle in alg.candidates for b in oracle.budgets
+                   if isinstance(b, float)]
+        assert numeric and all(b <= 0.2 for b in numeric), numeric
+
+
+class TestOpenRangeEdges:
+    """A face that runs to an OPEN declared edge is a domain face.
+
+    The encoding bounds an open range strictly, so the probe at the wall is
+    UNSAT for encoding reasons; with the inclusivity flags dropped, the
+    bisection then 'bracketed' against the edge itself and the face was
+    labeled boundary -- the exact distinction the three labels exist to make.
+    """
+
+    @staticmethod
+    def _encoding_with_flags(hi_incl):
+        class _Enc:
+            range_dict = {Real("x"): (True, "0", "10", hi_incl)}
+            bound = 1
+        return _Enc()
+
+    def _labels(self, hi_incl, x):
+        # Falsifying almost to the wall: within tol of 10, but not at it --
+        # geometrically indistinguishable from an open-edge encoding.
+        oracle = FakeOracle({x: (Fraction(4), Fraction(10) - Fraction(1, 4000))},
+                            tolerance=Fraction(1, 1000))
+        alg = RegionBoxDiscovery()
+        alg._config = None
+        _, labels, _ = alg._grow_box(
+            oracle, assn(x_0_0=5), self._encoding_with_flags(hi_incl),
+            _Theta(Fraction(1, 4)), 20, 1, 4, _SilentPrinter())
+        return labels
+
+    def test_an_open_edge_is_a_domain_face(self, x):
+        assert _DOMAIN in self._labels(False, x)
+
+    def test_a_closed_edge_stays_a_frontier(self, x):
+        labels = self._labels(True, x)
+        assert _DOMAIN not in labels and _BOUNDARY in labels
+
+
+def test_ic_pivots_are_sorted_by_variable_id():
+    """_grow_box grows greedily in one pass, so its axis order is part of the
+    geometry; the model dict arrives in solver order, which no seed pins."""
+    from stlmc.generation.box import _ic_pivots
+    range_dict = {Real("b"): None, Real("a"): None, Real("c"): None}
+    model = assn(c_0_0=3, a_0_0=1, b_0_0=2)
+    assert [v.id for v in _ic_pivots(model, range_dict)] == [
+        "a_0_0", "b_0_0", "c_0_0"]

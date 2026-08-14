@@ -30,7 +30,7 @@ explores each independently. At a target depth it grows a box, labels it, blocks
 its region (the box extended by theta on every face, so no falsifying sliver is
 left between the theta-quantized box and the true frontier), and re-pivots
 outside the blocked regions of that depth, up to the per-depth budget ``[gen]
-k-ic``; absent, the depth is explored to exhaustion. The blocks are per depth:
+k-ic``; absent or 0, the depth is explored to exhaustion. The blocks are per depth:
 each target depth discovers its own falsifying regions, so a region falsifying at
 several depths contributes a counterexample (with a different mode path) at each,
 making depth a first-class diversity axis rather than an incidental by-product of
@@ -86,9 +86,11 @@ from .common import (
     gen_float,
     gen_frac,
     gen_int,
+    gen_present,
     gen_str,
     resolve_seed,
     scoped_verdict,
+    validate_gen,
     warn_unpinned_hashseed,
     z3_logic,
 )
@@ -112,10 +114,21 @@ _BISECT_ITERS = 20
 # single candidate consume all of it.
 _DEFAULT_CANDIDATE_TIMEOUT = 45.0
 
+# Default for [gen] pivot-budget (seconds for one whole candidate search) and
+# [gen] k-witness (per-axis cell budget of the lattice harvest). Named so the
+# banner and the consumers resolve the same value: the `x or DEFAULT` idiom
+# they replaced also folded a configured 0 into the default and then printed
+# the default back as if it had been set (0 is now rejected by validate_gen
+# for these keys, or meaningful and honored where it has a meaning).
+_DEFAULT_PIVOT_BUDGET = 120.0
+_DEFAULT_K_WITNESS = 8
+_DEFAULT_LOG_EVERY = 25
+
 # Ceiling on the number of lattice cells harvested from one box. The lattice
 # grows as the product over IC axes -- four variables at eight cells per axis is
-# 4096 solver calls -- so the product is capped; the per-axis cell counts are
-# then reduced proportionally and the reduction is reported.
+# 4096 solver calls -- so the product is capped; cells are then removed from the
+# widest axis one at a time until the product fits, and the reduction is
+# reported.
 _LATTICE_MAX = 200
 
 # Per-counterexample labels.
@@ -234,9 +247,16 @@ def _skeleton_fix(assn: dict[Variable, Constant]) -> Formula:
 
 
 def _ic_pivots(assn: dict[Variable, Constant], range_dict) -> dict[Variable, Fraction]:
-    """Initial-condition variables (<name>_0_0) and their pivot values."""
+    """Initial-condition variables (<name>_0_0) and their pivot values.
+
+    Sorted by variable id. The assignment dict arrives in the solver's model
+    order (z3's ``decls()`` order, dReal's print order), which no seed pins --
+    and :meth:`RegionBoxDiscovery._grow_box` grows greedily in one pass, so
+    the converged geometry depends on this iteration order. Sorting makes the
+    box a function of the configuration and the solver build alone."""
     ic_ids = {f"{k.id}_0_0" for k in range_dict}
-    return {v: _frac(c.value) for v, c in assn.items() if v.id in ic_ids}
+    found = {v: _frac(c.value) for v, c in assn.items() if v.id in ic_ids}
+    return {v: found[v] for v in sorted(found, key=lambda var: var.id)}
 
 
 def _box_of(box: dict[Variable, list[Fraction]], skip: Variable, rv=_rv) -> Formula:
@@ -252,16 +272,20 @@ def _box_of(box: dict[Variable, list[Fraction]], skip: Variable, rv=_rv) -> Form
 
 def _ic_ranges(
     box: dict[Variable, list[Fraction]], range_dict
-) -> dict[Variable, tuple[Fraction, Fraction]]:
-    """Declared (lo, hi) for each IC variable in ``box``.
+) -> dict[Variable, tuple[Fraction, Fraction, bool, bool]]:
+    """Declared (lo, hi, lo_incl, hi_incl) for each IC variable in ``box``.
 
     ``range_dict`` maps a state Variable to ``(lo_incl, lo, hi, hi_incl)``; the
-    IC variable ``<name>_0_0`` inherits the ``(lo, hi)`` of its state variable
-    ``<name>``.
+    IC variable ``<name>_0_0`` inherits the bounds of its state variable
+    ``<name>``. The inclusivity flags ride along because the encoding bounds
+    an open range strictly (``Lt``/``Gt``), and a face search that runs to an
+    open edge must be labeled ``domain``, not ``boundary``: dropping the flags
+    made the domain probe UNSAT for encoding reasons and mislabeled the face.
     """
-    by_id: dict[str, tuple[Fraction, Fraction]] = {}
+    by_id: dict[str, tuple[Fraction, Fraction, bool, bool]] = {}
     for state_var, bounds in range_dict.items():
-        by_id[f"{state_var.id}_0_0"] = (_frac(bounds[1]), _frac(bounds[2]))
+        by_id[f"{state_var.id}_0_0"] = (_frac(bounds[1]), _frac(bounds[2]),
+                                        bool(bounds[0]), bool(bounds[3]))
     return {var: by_id[var.id] for var in box if var.id in by_id}
 
 
@@ -410,11 +434,36 @@ def _binding_bound(attempts, refuted, undecided, undecided_seconds, elapsed):
             f"{undecided} undecided")
 
 
-def _verdict(pool, any_unresolved, visited, max_depth):
-    """kappa_box's wording for the shared depth-scoping rule."""
-    return scoped_verdict(pool, any_unresolved, visited, max_depth,
+def _box_budget(config):
+    """``[gen] k-ic`` resolved to a per-depth box budget.
+
+    ``None`` and ``0`` both mean no budget (the depth is explored to
+    exhaustion): 0 is the section's spelling for "off" (``word-rotate``,
+    ``thin-ic``, ``query-timeout``), and a budget of zero boxes would end every
+    depth after zero solver calls and let an empty run report True. A negative
+    value is a configuration error, for the same reason."""
+    budget = gen_int(config, "k-ic")
+    if budget is None or budget == 0:
+        return None
+    if budget < 0:
+        raise ValueError(
+            f"[gen] k-ic must be >= 0 (0 = no budget, explore the depth to "
+            f"exhaustion); got {budget}")
+    return budget
+
+
+def _verdict(pool, any_unresolved, settled, max_depth):
+    """kappa_box's wording for the shared depth-scoping rule.
+
+    ``settled`` is the set of depths the run actually decided: a depth counts
+    only when its structure space was exhausted by refutation alone. A depth
+    left by an undecided pivot, by the box budget, or by an exhaustion a
+    coverage heuristic took part in is visited but not settled, and must not
+    ground a True."""
+    return scoped_verdict(pool, any_unresolved, settled, max_depth,
                           tag="kappa_box", nothing_found="no box found",
-                          unresolved_source="at least one pivot search")
+                          unresolved_source="at least one pivot search or "
+                                            "heuristic-assisted exhaustion")
 
 
 def _merge_markers(witnesses, labels, markers, marker_labels, ic_vars, tol,
@@ -473,6 +522,7 @@ class RegionBoxDiscovery(Algorithm):
         self._rotated_words = 0
         self._undecided_candidates = 0
         self._pivot_giveup = None
+        self._metrics = _Counter()
 
     def set_debug(self, msg: str) -> None:
         self.debug_name = msg
@@ -496,6 +546,13 @@ class RegionBoxDiscovery(Algorithm):
         return make_oracle(self._underlying, logic=logic, seed=seed,
                            config=self._config, logger=self._logger,
                            time_bound=self._tau_max)
+
+    def _exact_oracle(self, logic, seed):
+        """The single-query pivot oracle of the exact path. A method for the
+        same reason as :meth:`_skeleton_oracle`: a test substitutes it to
+        exercise the block-frame discipline without a solver."""
+        return Z3IncrementalOracle(logic, seed,
+                                   timeout=query_timeout(self._config))
 
     def _pivot_two_step(self, encoding, logic, seed, blocks):
         """Find a pivot in two steps, as STLMC's own checking does.
@@ -575,10 +632,13 @@ class RegionBoxDiscovery(Algorithm):
         rotate = gen_int(self._config, "word-rotate")
         rotation = _WordRotation(30 if rotate is None else rotate)
 
-        every = gen_int(self._config, "log-every") or 25
-        budget = gen_float(self._config, "pivot-budget") or 120.0
-        candidate_bound = (gen_float(self._config, "pivot-timeout")
-                           or _DEFAULT_CANDIDATE_TIMEOUT)
+        every = gen_int(self._config, "log-every")
+        every = _DEFAULT_LOG_EVERY if every is None else every
+        budget = gen_float(self._config, "pivot-budget")
+        budget = _DEFAULT_PIVOT_BUDGET if budget is None else budget
+        candidate_bound = gen_float(self._config, "pivot-timeout")
+        if candidate_bound is None:
+            candidate_bound = _DEFAULT_CANDIDATE_TIMEOUT
         started = _time.monotonic()
         deadline = started + budget
         attempt, refuted, undecided_seconds = 0, 0, 0.0
@@ -591,13 +651,25 @@ class RegionBoxDiscovery(Algorithm):
                 self._printer.print_verbose(
                     f"[diag] first z3 check: {_v0} in {_time.monotonic() - _tz:.1f}s")
             if _v0 != SAT:
-                self._last_pivot_verdict = UNSAT
+                # UNSAT exhausts the structure space; UNKNOWN means the
+                # skeleton solver gave up within its bound. Collapsing them
+                # would report "no more boxes" for a resource failure -- the
+                # same rule the exact path applies in _pivot_at.
+                self._last_pivot_verdict = _v0
                 return None, None, None
             candidate = z3o.model()
-            word = "".join(
+            # Positional: sorted by the STEP INDEX and joined with a
+            # separator. The lexicographic digit join sorted currentMode_10
+            # before currentMode_2 and rendered (1,12) and (11,2) identically
+            # ("112"), so at >= 10 modes or depth >= 10 two different paths
+            # could share one rotation streak -- and a feasible word could be
+            # rotated off on another word's refutations.
+            word = ".".join(
                 str(int(round(float(c.value))))
-                for v, c in sorted(candidate.items(), key=lambda kv: kv[0].id)
-                if MODE_RE.match(v.id))
+                for v, c in sorted(
+                    ((v, c) for v, c in candidate.items()
+                     if MODE_RE.match(v.id)),
+                    key=lambda kv: int(MODE_RE.match(kv[0].id).group(1))))
             mode_only = And([Eq(v, c) for v, c in candidate.items()
                              if MODE_RE.match(v.id)]) if word else BoolVal("True")
 
@@ -627,9 +699,25 @@ class RegionBoxDiscovery(Algorithm):
             block_this = _skeleton_fix(candidate)
 
             d = self._candidate_oracle(logic, seed)
-            d.set_budget(candidate_bound)
+            # Clamped to what is left of the search budget, so one candidate
+            # cannot overrun the deadline by a whole pivot-timeout. (The z3
+            # skeleton call above is bounded by query-timeout at construction,
+            # so the residual overrun of one iteration is at most that.)
+            d.set_budget(min(candidate_bound,
+                             max(deadline - _time.monotonic(), 0.1)))
             d.assert_(encoding.consts)
             d.assert_(pinned)
+            # The region blocks must bind THIS oracle too. They are asserted
+            # into z3o above, but z3's candidate only pins modes and Bools:
+            # the pivot the run uses is this oracle's model, whose reals are
+            # otherwise free to sit inside an already-blocked box -- and this
+            # oracle is also what grows the box, so unblocked it regrows the
+            # same region. Framed so growth still runs on Enc_n[w] alone,
+            # mirroring _pivot_at (including the no-empty-frame rule there).
+            if blocks:
+                d.push()
+                for block in blocks:
+                    d.assert_(block)
             _t0 = _time.monotonic()
             v = d.check()
             _el = _time.monotonic() - _t0
@@ -643,8 +731,9 @@ class RegionBoxDiscovery(Algorithm):
                     "({:.1f}s)".format(attempt, word or "-", v, _el))
             if v == SAT:
                 self._metrics["accepted"] += 1
-                model = d.model()
-                d.assert_(pinned)
+                model = d.model()  # before pop(): pop clears the model state
+                if blocks:
+                    d.pop()
                 return d, model, encoding
             # Not usable *as tested*: block exactly the assignment that was
             # checked so the search moves on. What that block is worth differs
@@ -693,14 +782,34 @@ class RegionBoxDiscovery(Algorithm):
             return self._pivot_two_step(encoding, logic, seed, blocks)
         # Only the exact backend reaches here; a delta backend always takes the
         # two-step path above.
-        oracle = Z3IncrementalOracle(logic, seed,
-                                     timeout=query_timeout(self._config))
+        oracle = self._exact_oracle(logic, seed)
+        # One query decides one pivot here, so the pair reads 1/1 per box on
+        # this backend; without it the metrics line printed 0/0 on every
+        # exact run while the same line fed pivot-budget sizing on the other.
+        self._metrics["candidates"] += 1
         oracle.assert_(encoding.consts)
-        for block in blocks:
-            oracle.assert_(block)
+        # The blocks bind the PIVOT, never growth (Alg. 2: Pivot solves
+        # Enc_n conjoined with the negated blocks, while every growth query
+        # runs on Enc_n[w] alone). Asserted permanently they also wall in the
+        # box growth: _search_face reads UNSAT at a block wall as a bracketed
+        # frontier and emits a `boundary` marker at a purely algorithmic wall.
+        # So they live in a frame that is popped once the pivot is extracted.
+        # No frame when there is nothing to put in it: an empty push/pop still
+        # perturbs the solver's model choice, which would change the pool of
+        # every existing single-box configuration for no semantic reason.
+        if blocks:
+            oracle.push()
+            for block in blocks:
+                oracle.assert_(block)
         v = oracle.check()
         if v == SAT:
-            return oracle, oracle.model(), encoding
+            self._metrics["accepted"] += 1
+            pivot = oracle.model()  # before pop(): pop clears the model state
+            if blocks:
+                oracle.pop()
+            return oracle, pivot, encoding
+        if blocks:
+            oracle.pop()
         # UNSAT means the region is exhausted; UNKNOWN means the solver gave up.
         # Collapsing them reports "no more boxes" for a resource failure.
         self._last_pivot_verdict = v
@@ -834,8 +943,9 @@ class RegionBoxDiscovery(Algorithm):
         two are equivalent: same cell count, same midpoints.
 
         ``cap`` bounds the product, which grows exponentially in the number of IC
-        variables. When the full lattice exceeds it, the per-axis cell counts are
-        reduced proportionally and the reduction is reported.
+        variables. When the full lattice exceeds it, cells are removed from the
+        widest axis one at a time until the product fits, and the reduction is
+        reported.
 
         Returns ``(witnesses, requested, undecided)``."""
         axes = list(box)
@@ -844,24 +954,36 @@ class RegionBoxDiscovery(Algorithm):
             lo, hi = box[var]
             span = hi - lo
             th = theta.of(var)
-            cells[var] = min(budget, max(1, int(span / th))) if span > 0 else 0
+            # Def. 7: c_j = min(k, max(1, floor(span/theta))), so c_j >= 1
+            # always. An axis narrower than theta -- a face that never grew, or
+            # an IC the model pins -- contributes ONE cell at its pivot value,
+            # never none: zeroing it silently discarded the whole harvest of
+            # every other axis, and a box was returned as pivot + markers with
+            # k-witness inert.
+            cells[var] = min(budget, max(1, int(span / th)))
             half[var] = th / 2
-        if any(n == 0 for n in cells.values()):
-            return [], 0, 0
 
         total = 1
         for var in axes:
             total *= cells[var]
+        uncapped = total
         if cap and total > cap:
-            # Shrink every axis by the same factor, so the lattice keeps its
-            # shape instead of collapsing whichever axis happens to be last.
-            import math
-            shrink = (cap / total) ** (1.0 / len(axes))
-            for var in axes:
-                cells[var] = max(1, int(math.floor(cells[var] * shrink)))
-            total = 1
-            for var in axes:
-                total *= cells[var]
+            # One cell off the widest axis at a time, until the product fits.
+            # The earlier uniform shrink floored every axis by the same factor
+            # and the flooring compounded: five axes at 3 cells (243) under a
+            # 200 cap collapsed to 2^5 = 32 rather than stopping at 162.
+            while total > cap and any(n > 1 for n in cells.values()):
+                widest = max(axes, key=lambda v: cells[v])
+                total //= cells[widest]
+                cells[widest] -= 1
+                total *= cells[widest]
+            printer = getattr(self, "_printer", None)
+            if printer is not None:
+                printer.print_normal(
+                    "[kappa_box] lattice capped: {} cell(s) requested, "
+                    "reduced to {} (cap {}): {}".format(
+                        uncapped, total, cap,
+                        ", ".join(f"{v.id}={cells[v]}" for v in axes)))
 
         def centres(var, index):
             lo, hi = box[var]
@@ -907,7 +1029,14 @@ class RegionBoxDiscovery(Algorithm):
         converged box. What the oracle changes is the precision: the search runs
         to ``theta / 2**iters`` on an exact oracle and to ``theta / 8`` on a
         partial one, in both cases floored by the oracle's own tolerance, since
-        no query distinguishes points closer than that."""
+        no query distinguishes points closer than that.
+
+        Growth is greedy and single-pass: each axis is searched against the
+        already-grown extents of the axes before it and the pivot values of
+        the axes after it, in the (sorted) order ``_ic_pivots`` fixes. The
+        converged box is therefore a function of that order -- a second pass
+        could grow it further -- and is a bounding box of confirmed slices,
+        not a maximal box of the falsifying set."""
         ic = _ic_pivots(pivot, encoding.range_dict)
         if not ic:
             raise RuntimeError("no initial-condition variables (<name>_0_0) found")
@@ -925,7 +1054,8 @@ class RegionBoxDiscovery(Algorithm):
         for var in box:
             tol = tol_of(var)
             others = _box_of(box, var, oracle.rv)
-            lo_dom, hi_dom = ranges.get(var, (None, None))
+            lo_dom, hi_dom, lo_incl, hi_incl = ranges.get(
+                var, (None, None, True, True))
             for direction in (+1, -1):
                 wall = hi_dom if direction > 0 else lo_dom
                 if wall is None:
@@ -934,6 +1064,15 @@ class RegionBoxDiscovery(Algorithm):
                 bound, status, c = self._search_face(
                     oracle, var, others, start, wall, tol)
                 calls += c
+                wall_open = not (hi_incl if direction > 0 else lo_incl)
+                if (status == "frontier" and wall_open
+                        and abs(wall - bound) <= 2 * tol):
+                    # An open range edge: the encoding bounds the variable
+                    # strictly, so the probe AT the wall is UNSAT for encoding
+                    # reasons and the bisection "brackets" against the edge
+                    # itself. The falsifying set runs to the declared range --
+                    # a domain face, not an interior frontier.
+                    status = "domain"
                 if direction > 0:
                     box[var][1] = bound
                 else:
@@ -1049,14 +1188,22 @@ class RegionBoxDiscovery(Algorithm):
         self._logger = logger
         self._tau_max = common.get_value("time-bound")
 
+        # Every [gen] value the strategy reads is range-checked here, before
+        # the first solver call: out-of-range values otherwise fail late (a
+        # non-terminating bisection, a crash after a paid pivot search) or
+        # silently (an unbounded solver call).
+        validate_gen(config)
+
         logic = z3_logic(config)
-        seed = resolve_seed(config)
+        seed = resolve_seed(config, printer)
         # theta: absolute by default, per-axis when [gen] epsilon-relative is set.
         theta = _Theta(gen_frac(config, "epsilon", "0.01"),
                        gen_frac(config, "epsilon-relative", "0") or None,
                        model.range_dict)
-        bisect_iters = gen_int(config, "bisect-iters") or _BISECT_ITERS
-        per_depth_boxes = gen_int(config, "k-ic")  # per target depth; None -> exhaust
+        bisect_iters = gen_int(config, "bisect-iters")
+        # 0 is a meaningful setting (face precision theta itself), so no `or`.
+        bisect_iters = _BISECT_ITERS if bisect_iters is None else bisect_iters
+        per_depth_boxes = _box_budget(config)  # per target depth; None -> exhaust
         thin = gen_frac(config, "thin-ic", "0")  # 0 -> no thinning
         target_depths = gen_depths(config, max_depth)
         # A per-axis theta changes witness spacing on every axis, so the
@@ -1073,34 +1220,42 @@ class RegionBoxDiscovery(Algorithm):
         self._rotated_words = 0
         self._undecided_candidates = 0
         self._pivot_giveup = None
-        if underlying != "z3":
-            # A configuration still setting a removed key would otherwise get
-            # silence, which reads as the key being in effect.
-            for gone in ("word-pruning", "word-check-timeout",
-                         "assume-monotone-flows", "block-class",
-                         "two-step-pivot", "warm-start", "lattice-max"):
-                if gen_int(config, gone) is not None:
-                    printer.print_normal(
-                        f"warning: [gen] {gone} no longer exists and is "
-                        "ignored")
+        # A configuration still setting a removed key would otherwise get
+        # silence, which reads as the key being in effect. Presence-checked
+        # rather than parsed: several of these were boolean-shaped, and
+        # int("true") would abort the run before the warning printed. Checked
+        # on BOTH backends -- a stale key is stale regardless of the solver.
+        for gone in ("word-pruning", "word-check-timeout",
+                     "assume-monotone-flows", "block-class",
+                     "two-step-pivot", "warm-start", "lattice-max"):
+            if gen_present(config, gone):
+                printer.print_normal(
+                    f"warning: [gen] {gone} no longer exists and is "
+                    "ignored")
 
+        if underlying != "z3":
             printer.print_normal(
                 "[kappa_box] word-rotate={}".format(
                     30 if gen_int(config, "word-rotate") is None
                     else (gen_int(config, "word-rotate") or "off")))
-            pivot_timeout = (gen_float(config, "pivot-timeout")
-                             or _DEFAULT_CANDIDATE_TIMEOUT)
+            pivot_timeout = gen_float(config, "pivot-timeout")
+            if pivot_timeout is None:
+                pivot_timeout = _DEFAULT_CANDIDATE_TIMEOUT
+            pivot_budget = gen_float(config, "pivot-budget")
+            if pivot_budget is None:
+                pivot_budget = _DEFAULT_PIVOT_BUDGET
+            # "per pivot search", not "per depth": the budget is enforced per
+            # call of the candidate search, and a depth under k-ic = n runs up
+            # to n+1 of them.
             printer.print_normal(
                 "[kappa_box] pivot budgets: pivot-timeout={}s per candidate, "
-                "pivot-budget={}s per depth".format(
-                    pivot_timeout,
-                    gen_float(config, "pivot-budget") or 120.0))
+                "pivot-budget={}s per pivot search".format(
+                    pivot_timeout, pivot_budget))
 
         # Reported on either backend, because it bounds every solver call the
-        # strategy makes on either. Resolved through `query_timeout` rather than
-        # read a second time here: `gen_float` folds 0 into None, so a disabled
-        # bound was reported as the default, and it raises on the other
-        # spellings that disable one.
+        # strategy makes on either. Resolved through `query_timeout` rather
+        # than read a second time here, so the banner and the oracles cannot
+        # disagree about the words ("off"/"none") that disable the bound.
         bound = query_timeout(config)
         printer.print_normal(
             "[kappa_box] query-timeout={} per solver call "
@@ -1112,14 +1267,22 @@ class RegionBoxDiscovery(Algorithm):
         labels: list[str] = []
         first_depth = max_depth
         total_boxes = 0
+        # Depths the run DECIDED, not merely targeted: a depth is settled only
+        # by an exhaustion in which every candidate was refuted. scoped_verdict
+        # is contracted on this set; passing the target set instead let a depth
+        # that was skipped (or exhausted under a heuristic) ground a True.
+        settled: set[int] = set()
 
         for depth in target_depths:
             blocks: list[Formula] = []  # per depth: independent region discovery
             boxes_here = 0
             # Both caveats on an exhaustion claim are scoped to a depth, since
-            # the structure space and its blocks are.
+            # the structure space and its blocks are -- and so is the metrics
+            # line, which is printed under a per-depth label and previously
+            # accumulated over the whole run.
             self._rotated_words = 0
             self._undecided_candidates = 0
+            self._metrics = _Counter()
             while per_depth_boxes is None or boxes_here < per_depth_boxes:
                 oracle, pivot, encoding = self._pivot_at(
                     encoder, depth, logic, seed, blocks
@@ -1164,6 +1327,11 @@ class RegionBoxDiscovery(Algorithm):
                                  f"no counterexample outside the "
                                  f"{boxes_here} box(es) already found")
                         if heuristic:
+                            # An exhaustion a heuristic took part in does not
+                            # settle the depth: candidates were removed that no
+                            # oracle refuted (Def. of the pruning policy), so
+                            # the verdict must not read this depth as decided.
+                            self._any_unresolved = True
                             printer.print_normal(
                                 "[kappa_box] depth {}: structure space exhausted, "
                                 "but not every candidate was refuted ({}) -- "
@@ -1172,6 +1340,7 @@ class RegionBoxDiscovery(Algorithm):
                                     depth, ", ".join(heuristic),
                                     " and ".join(remedies)))
                         else:
+                            settled.add(depth)
                             printer.print_normal(
                                 f"[kappa_box] depth {depth}: structure space "
                                 f"exhausted -- {scope} (absence, established by "
@@ -1180,9 +1349,11 @@ class RegionBoxDiscovery(Algorithm):
                     break
 
                 oracle.assert_(_skeleton_fix(pivot))  # pin path + Boolean skeleton
+                k_witness = gen_int(config, "k-witness")
                 witnesses, box_labels, box = self._grow_box(
                     oracle, pivot, encoding, theta, bisect_iters, depth,
-                    gen_int(config, "k-witness") or 8, printer
+                    _DEFAULT_K_WITNESS if k_witness is None else k_witness,
+                    printer
                 )
                 boxes_here += 1
                 total_boxes += 1
@@ -1229,7 +1400,7 @@ class RegionBoxDiscovery(Algorithm):
         )
 
         result, note = _verdict(pool, getattr(self, "_any_unresolved", False),
-                                target_depths, max_depth)
+                                settled, max_depth)
         if note:
             printer.print_normal(note)
         return result, 0.0, first_depth, pool
