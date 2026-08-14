@@ -166,7 +166,7 @@ class TestVerdict:
         assert "2/3/4/5" in note, "the note must name what was skipped"
 
     def test_an_empty_target_set_forbids_true(self):
-        """[gen] depths is clamped to 1..bound, so it can select nothing at all.
+        """[gen] depths is clamped to 0..bound, so it can select nothing at all.
         Examining no depth is the extreme case of examining a subset."""
         result, note = _verdict([], False, [], 3)
         assert result == "Unknown"
@@ -202,3 +202,54 @@ class TestVerdict:
     def test_the_note_names_the_strategy(self):
         _, note = _verdict([], False, [1], 2)
         assert note.startswith("[kappa_path]")
+
+
+class TestWordIntegrity:
+    """The delta backend reports every model value as an interval midpoint. A
+    block built from a non-integral mode value misses the word the solver
+    satisfied: at radius 0 the same model can be returned forever, at radius
+    >= 1 the ball is centred off-word. The run guards the word before pooling
+    or blocking; these tests pin the guard's parts."""
+
+    def test_integral_decimals_are_canonicalised_in_the_block(self):
+        """dReal formats an integral value as e.g. "1.000000"; the block must
+        exclude the Hamming ball around (1, 2) exactly as if the values were
+        exact. The enumeration here is over Real-typed mode variables, as on
+        the delta backend (the shared `admitted` helper enumerates Int-typed
+        ones, which z3 keeps distinct from same-named Reals)."""
+        from stlmc.constraints.constraints import Real, RealVal
+
+        assignment = {Real("currentMode_0"): RealVal("1.000000"),
+                      Real("currentMode_1"): RealVal("2.000000")}
+        for radius in (0, 1):
+            block = block_radius(assignment, radius, uid=radius)
+            solver = z3.Solver()
+            solver.add(z3Obj(block.clause))
+            still = set()
+            for candidate in itertools.product(range(MODES), repeat=2):
+                solver.push()
+                for k, value in enumerate(candidate):
+                    solver.add(z3.Real(f"currentMode_{k}") == value)
+                if solver.check() == z3.sat:
+                    still.add(candidate)
+                solver.pop()
+            expected = {w for w in itertools.product(range(MODES), repeat=2)
+                        if hamming(w, (1, 2)) > radius}
+            assert still == expected, radius
+
+    def test_off_lattice_positions_are_detected(self):
+        from stlmc.constraints.constraints import Real, RealVal
+        from stlmc.generation.pathenum import _location_word, _off_lattice
+
+        assignment = {Real("currentMode_0"): RealVal("1.500000"),
+                      Real("currentMode_1"): RealVal("2.000000")}
+        bad = _off_lattice(_location_word(assignment))
+        assert bad == ["currentMode_0=1.500000"]
+
+    def test_an_integral_word_is_not_flagged(self):
+        from stlmc.constraints.constraints import Real, RealVal
+        from stlmc.generation.pathenum import _location_word, _off_lattice
+
+        assignment = {Real("currentMode_0"): RealVal("1.000000"),
+                      Real("currentMode_1"): RealVal("2")}
+        assert _off_lattice(_location_word(assignment)) == []
