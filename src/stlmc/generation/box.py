@@ -1248,9 +1248,8 @@ class RegionBoxDiscovery(Algorithm):
             # call of the candidate search, and a depth under k-ic = n runs up
             # to n+1 of them.
             printer.print_normal(
-                "[kappa_box] pivot budgets: pivot-timeout={}s per candidate, "
-                "pivot-budget={}s per pivot search".format(
-                    pivot_timeout, pivot_budget))
+                f"[kappa_box] pivot budgets: pivot-timeout={pivot_timeout}s "
+                f"per candidate, pivot-budget={pivot_budget}s per pivot search")
 
         # Reported on either backend, because it bounds every solver call the
         # strategy makes on either. Resolved through `query_timeout` rather
