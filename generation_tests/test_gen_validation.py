@@ -12,7 +12,11 @@ subprocess had already spawned.
 
 import pytest
 
-from stlmc.generation.common import validate_gen
+from stlmc.generation.common import (
+    DEFAULT_BACKEND_PRECISION,
+    backend_precision,
+    validate_gen,
+)
 from stlmc.generation.oracle import DEFAULT_QUERY_TIMEOUT, query_timeout
 from stlmc.objects.configuration import Configuration, Section
 
@@ -86,3 +90,41 @@ class TestQueryTimeoutRange:
         with pytest.raises(ValueError) as err:
             query_timeout(config_with_gen(query_timeout=value))
         assert "query-timeout" in str(err.value)
+
+def config_with_dreal(**values):
+    section = Section()
+    section.name = "dreal"
+    section.arguments = {k.replace("_", "-"): v for k, v in values.items()}
+    config = Configuration()
+    config.add_section(section)
+    return config
+
+
+class TestBackendPrecision:
+    """The relaxation is resolved once and used three times -- passed to the
+    binary, floored under every frontier, recorded on the pool -- so what it
+    resolves to is worth pinning per case rather than per run."""
+
+    def test_an_exact_backend_answers_under_no_relaxation(self):
+        assert backend_precision(config_with_dreal(precision="0.01"), "z3") == 0
+
+    def test_an_absent_section_or_key_is_the_backend_default(self):
+        assert backend_precision(None, "dreal") == DEFAULT_BACKEND_PRECISION
+        assert backend_precision(Configuration(), "dreal") == DEFAULT_BACKEND_PRECISION
+        assert backend_precision(config_with_dreal(ode_order="5"),
+                                 "dreal") == DEFAULT_BACKEND_PRECISION
+
+    def test_a_configured_value_is_exact(self):
+        """Read as a Fraction, not a float: it floors a frontier located over
+        exact rationals."""
+        from fractions import Fraction
+
+        assert backend_precision(config_with_dreal(precision="0.01"),
+                                 "dreal") == Fraction(1, 100)
+
+    @pytest.mark.parametrize("value", ["0", "-0.001", "off", ""])
+    def test_a_value_with_no_reading_is_a_configuration_error(self, value):
+        """Substituting the default for one of these would report a run that
+        did not happen."""
+        with pytest.raises(ValueError, match="precision"):
+            backend_precision(config_with_dreal(precision=value), "dreal")

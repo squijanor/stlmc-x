@@ -11,6 +11,7 @@ enforcement is not.
 """
 
 import inspect
+from fractions import Fraction
 
 from stlmc.constraints.constraints import And, Eq, Geq, Int, IntVal, Leq, Mul
 from stlmc.generation.oracle import (
@@ -237,3 +238,43 @@ class TestDrealClassification:
             0, "Solution:\ncurrentMode_0 : Int = [1, 1]", "no-newline")
         assert result == "False"
         assert assignment._dreal_model
+
+class TestDrealSolverArgs:
+    """What the binary is actually told.
+
+    The [dreal] section was read for the ODE settings and the executable path,
+    but the delta was never passed on, so a configured value described a run it
+    did not reach. These pin the command line rather than the configuration.
+    """
+
+    def _solver(self):
+        from stlmc.solver.dreal import dRealSolver
+
+        return dRealSolver()
+
+    def test_a_solver_that_was_not_given_a_delta_keeps_its_command_line(self):
+        """Upstream's arms never ask for one, so they must be unaffected."""
+        solver = self._solver()
+        assert solver._solver_args("dReal", "q.smt2") == [
+            "dReal", "q.smt2", "--short_sat", "--model"]
+
+    def test_a_configured_delta_reaches_the_binary(self):
+        solver = self._solver()
+        solver.set_precision(Fraction(1, 100))
+        assert solver._solver_args("dReal", "q.smt2") == [
+            "dReal", "q.smt2", "--short_sat", "--model", "--precision", "0.01"]
+
+    def test_the_delta_is_rendered_as_a_decimal(self):
+        """dReal3's parser has no p/q literal, so an exact rational must not
+        reach the command line as one."""
+        solver = self._solver()
+        solver.set_precision(Fraction(1, 1000))
+        assert "--precision" in solver._solver_args("dReal", "q.smt2")
+        assert "1/1000" not in solver._solver_args("dReal", "q.smt2")
+
+    def test_the_delta_can_be_cleared(self):
+        solver = self._solver()
+        solver.set_precision(Fraction(1, 100))
+        solver.set_precision(None)
+        assert solver._solver_args("dReal", "q.smt2") == [
+            "dReal", "q.smt2", "--short_sat", "--model"]
