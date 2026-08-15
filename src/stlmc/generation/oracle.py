@@ -349,6 +349,11 @@ class DrealReSolveOracle(GrowthOracle):
 
         solver = dRealSolver()
         solver.set_config(self._config)
+        # The delta reaches the binary from here rather than from the solver's
+        # own reading of [dreal], so an arm that has not asked for one keeps
+        # the command line it had. Every generation query is issued at the
+        # value `tolerance` also floors frontiers with.
+        solver.set_precision(self.tolerance)
         if self._logger is not None:
             solver.append_logger(self._logger)
         if self._time_bound is not None:
