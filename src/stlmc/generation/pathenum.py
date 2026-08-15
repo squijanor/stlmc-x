@@ -68,6 +68,7 @@ from ..constraints.constraints import (
 from ..objects.algorithm import Algorithm
 from .common import (
     MODE_RE,
+    backend_precision,
     gen_depths,
     gen_int,
     resolve_seed,
@@ -274,6 +275,16 @@ class DiscretePathEnum(Algorithm):
                 logger=logger,
                 time_bound=tau_max,
             )
+
+        # The delta the backend answers under, echoed on the delta path
+        # because it now reaches the binary: a run's frontiers, its pool's
+        # recorded relaxation and its solver calls are all this one value, and
+        # a configured value that fails to arrive is otherwise invisible.
+        if underlying == "dreal":
+            printer.print_normal(
+                f"[kappa_path] backend precision="
+                f"{float(backend_precision(config, underlying))} "
+                f"per solver call ([dreal] precision)")
 
         encoder = Encoder(model, goal, prop_dict, delta, tau_max)
         pool: list[dict[Variable, Constant]] = []
