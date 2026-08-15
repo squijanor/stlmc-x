@@ -15,6 +15,7 @@ import os
 import pickle
 import subprocess
 import sys
+from collections import Counter
 from fractions import Fraction
 
 import pytest
@@ -368,3 +369,28 @@ def test_every_record_reports_whether_its_verdict_is_resolved(validation):
         assert rec["rho0_refined"] != ""
         assert rec["rho0_shift"] != ""
         assert rec["resolved"] in ("yes", "no")
+
+
+def test_one_entry_per_initial_condition_across_boxes(tmp_path):
+    """Def. pool rule (ii) is a depth rule too.
+
+    Two boxes at one depth can converge on the same face, and a marker is
+    exempt from separation but not from this: without the cross-box check the
+    pool carries the same initial condition twice, at distance zero on every
+    axis the metrics measure. The single-box configuration every other
+    duplicate assertion runs at cannot see it.
+    """
+    stdout, pool = run_box(
+        tmp_path, k_ic=3,
+        extra="depths = 2\n    k-witness = 3\n    bisect-iters = 4")
+    assert pool is not None, stdout
+    with open(pool, "rb") as handle:
+        payload = pickle.load(handle)
+    assert stdout.count("box ") > 1, "this test needs more than one box\n" + stdout
+    axes = [ic_values(payload, v) for v in ("x1_0_0", "x2_0_0")]
+    axes = [a for a in axes if a]
+    points = list(zip(*axes))
+    duplicates = [p for p, n in Counter(points).items() if n > 1]
+    assert not duplicates, (
+        "the same initial condition appears more than once: "
+        f"{[tuple(float(x) for x in p) for p in duplicates[:3]]}\n" + stdout)
