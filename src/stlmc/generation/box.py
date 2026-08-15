@@ -36,10 +36,16 @@ several depths contributes a counterexample (with a different mode path) at each
 making depth a first-class diversity axis rather than an incidental by-product of
 re-pivoting. The returned pool is the union over target depths.
 
-Thinning (``[gen] thin-ic``) drops a new deep witness that lies within thin-ic
-(per axis) of a witness already in the pool -- across depths as well as within a
-depth -- while boundary and domain markers are exempt and always kept, since they
-mark the frontier. The default of 0 leaves thinning off.
+Separation is per depth. theta is the minimum separation of the witnesses a
+depth contributes, not merely of the witnesses one box contributes: growth runs
+unmasked, so a later box may regrow across an earlier one, and a deep witness
+within theta of one an earlier box at the same depth contributed is dropped.
+Across depths no separation is imposed, because one initial condition falsifying
+at several depths is the depth axis rather than redundancy. Thinning
+(``[gen] thin-ic``) applies a coarser radius under the same scope, so a value at
+or below theta is a no-op. Boundary and domain markers are exempt from both and
+always kept, since their position is the information they carry. The thinning
+default of 0 leaves it off.
 
 Initial-condition variables are the step-0 state copies ``<name>_0_0`` for each
 state variable named by ``range_dict``; mode variables are ``currentMode_k``.
@@ -311,6 +317,25 @@ def _too_close(
     initial-condition axis (an L-infinity ball of radius ``thin``)."""
     for other in pool:
         if all(abs(_value_of(witness, v) - _value_of(other, v)) < thin
+               for v in ic_vars):
+            return True
+    return False
+
+
+def _within_theta(
+    witness: dict[Variable, Constant],
+    pool: list[dict[Variable, Constant]],
+    ic_vars,
+    theta: _Theta,
+) -> bool:
+    """True if ``witness`` lies within theta of some pooled witness.
+
+    The per-axis counterpart of :func:`_too_close`. Separation is an L-infinity
+    condition, so two witnesses are too close only when they are within theta on
+    *every* axis; one axis at or beyond its own theta separates them.
+    """
+    for other in pool:
+        if all(abs(_value_of(witness, v) - _value_of(other, v)) < theta.of(v)
                for v in ic_vars):
             return True
     return False
@@ -1275,6 +1300,15 @@ class RegionBoxDiscovery(Algorithm):
         for depth in target_depths:
             blocks: list[Formula] = []  # per depth: independent region discovery
             boxes_here = 0
+            # The witnesses admitted at this depth, and the scope of both
+            # admission rules below. theta is the pool's minimum separation, and
+            # a depth is where that has to hold: growth runs unmasked, so a
+            # later box may regrow across an earlier one and place a lattice
+            # centre arbitrarily close to a witness the earlier box contributed.
+            # Across depths the opposite holds -- one initial condition
+            # falsifying at several depths is the depth axis, not redundancy --
+            # so neither rule reaches beyond the depth it is applied in.
+            depth_pool: list[dict[Variable, Constant]] = []
             # Both caveats on an exhaustion claim are scoped to a depth, since
             # the structure space and its blocks are -- and so is the metrics
             # line, which is printed under a per-depth label and previously
@@ -1360,16 +1394,36 @@ class RegionBoxDiscovery(Algorithm):
                     first_depth = depth
 
                 kept = 0
+                collapsed_across = 0
+                # Earlier boxes at this depth only. _grow_box already separates
+                # a box's own deep witnesses from each other, so checking
+                # against a snapshot rather than the live list leaves the
+                # single-box case exactly as it was and adds only the
+                # cross-box rule.
+                prior_here = list(depth_pool)
                 for witness, label in zip(witnesses, box_labels):
-                    # Thin only deep (interior) witnesses; boundary and domain
-                    # markers mark the frontier and are always kept.
+                    # Both rules apply to deep (interior) witnesses only;
+                    # boundary and domain markers mark the frontier, and their
+                    # position is the information they carry, so they are always
+                    # kept.
+                    if label == _DEEP and _within_theta(
+                        witness, prior_here, box.keys(), theta
+                    ):
+                        collapsed_across += 1
+                        continue
                     if thin > 0 and label == _DEEP and _too_close(
-                        witness, pool, box.keys(), thin
+                        witness, depth_pool, box.keys(), thin
                     ):
                         continue
+                    depth_pool.append(witness)
                     pool.append(witness)
                     labels.append(label)
                     kept += 1
+                if collapsed_across:
+                    printer.print_verbose(
+                        f"[kappa_box] {collapsed_across} deep witness(es) of "
+                        f"this box landed within theta of a witness an earlier "
+                        f"box at depth {depth} contributed and were dropped")
 
                 # Block the box extended by theta on every face. At convergence
                 # the point theta beyond each face is non-falsifying, so extending
