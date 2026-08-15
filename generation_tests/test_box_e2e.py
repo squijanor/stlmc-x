@@ -86,19 +86,33 @@ def test_run_falsifies_and_writes_a_pool(run):
 
 def test_labels_are_aligned_and_from_the_vocabulary(run):
     _, _, payload = run
-    assert len(payload) == 10, "labels ride the tenth payload element"
+    assert len(payload) == 11, (
+        "labels ride the tenth payload element and the backend relaxation the "
+        "eleventh")
     labels = payload[9]
     assert len(labels) == len(payload[0]), "one label per counterexample"
     assert set(labels) <= {"deep", "boundary", "domain"}
 
 
-def test_every_counterexample_falsifies(run):
-    """The property that makes a pool a pool. Uses the tool's own STL semantics."""
+@pytest.fixture(scope="module")
+def validation(run):
+    """One validation of the shared pool. Refinement is on by default, so this
+    evaluates every counterexample at two sampling densities; the assertions
+    below are independent views of that one measurement rather than three."""
     sys.path.insert(0, SRC)
     from stlmc.generation.validate import validate_pool
 
     _, _, payload = run
-    records = validate_pool(payload, samples=25)
+    return validate_pool(payload, samples=15)
+
+
+def test_every_counterexample_falsifies(validation):
+    """The property that makes a pool a pool. Uses the tool's own STL semantics.
+
+    `threshold-only` passes: the encoding applies tau by relaxing the negated
+    goal, so a witness within tau of violating is what the search was asked for.
+    """
+    records = validation
     bad = [r for r in records if r["verdict"] in ("unverified", "error")]
     assert not bad, "non-falsifying entries: {}".format(
         [(r["index"], r["verdict"], r["note"]) for r in bad[:5]])
@@ -327,3 +341,30 @@ def test_thinning_does_not_reach_across_depths(tmp_path):
     assert close, (
         "thin-ic removed every witness pair within its own radius, so it is "
         "still being applied across depths\n" + stdout)
+
+
+def test_the_pool_records_the_relaxation_it_was_generated_under(run, validation):
+    """The eleventh element is what lets a consumer tell a witness from a
+    candidate. On the exact backend it is 0, and that 0 is a statement about
+    the run rather than an unfilled default."""
+    _, _, payload = run
+    assert payload[10] == 0.0
+
+    sys.path.insert(0, SRC)
+    from stlmc.generation.validate import pool_backend_delta
+
+    assert pool_backend_delta(payload) == 0.0
+    # Read from the pool rather than supplied: the fixture passes no
+    # backend_delta argument.
+    assert validation and all(r["backend_delta"] == 0.0 for r in validation)
+
+
+def test_every_record_reports_whether_its_verdict_is_resolved(validation):
+    """Refinement is on by default, so every record carries the shift in
+    rho(0) between two sampling densities and its distance to the nearest band
+    edge. A verdict quoted without those is a verdict with no error bar."""
+    for rec in validation:
+        assert rec["band_margin"] != ""
+        assert rec["rho0_refined"] != ""
+        assert rec["rho0_shift"] != ""
+        assert rec["resolved"] in ("yes", "no")

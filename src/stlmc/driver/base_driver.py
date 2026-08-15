@@ -387,8 +387,11 @@ class BaseRunner(Runner):
 
                         # A generation strategy returns a pool (list of assignment dicts) and
                         # writes ".counterexamples"; a single-CE run returns one dict and writes
-                        # ".counterexample". A strategy may expose per-CE labels on its ce_labels
-                        # attribute, appended as a tenth payload element when present.
+                        # ".counterexample". A pool carries two further elements: per-CE labels
+                        # on the tenth (the empty list where a strategy has none), and the
+                        # relaxation the backend answered under on the eleventh, so a pool says
+                        # for itself whether its entries are witnesses or candidates. Both are
+                        # written on the pool path only; the single-CE tuple is unchanged.
                         ext = "counterexamples" if is_pool else "counterexample"
                         ce_labels = getattr(algorithm, "ce_labels", None)
                         payload = (
@@ -402,7 +405,14 @@ class BaseRunner(Runner):
                             label,
                             float(delta),
                         )
-                        if ce_labels is not None:
+                        if is_pool:
+                            from ..generation.common import backend_precision
+
+                            payload = payload + (
+                                list(ce_labels) if ce_labels is not None else [],
+                                float(backend_precision(config, underlying_solver)),
+                            )
+                        elif ce_labels is not None:
                             payload = payload + (ce_labels,)
                         if is_pool:
                             # Dict insertion order in the assignment dicts is
@@ -454,3 +464,4 @@ class BaseRunner(Runner):
             print("syntax error: {}".format(e))
         except Exception as e:
             print("error: {}".format(e))
+            
