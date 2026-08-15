@@ -57,6 +57,7 @@ from ..constraints.constraints import (
     Variable,
 )
 from ..solver.z3 import Z3Assignment, z3Obj
+from .common import backend_precision
 
 # Native SMT verdicts. Strings (not an Enum) so they are picklable across worker
 # processes.
@@ -330,10 +331,7 @@ class DrealReSolveOracle(GrowthOracle):
     @property
     def tolerance(self) -> Fraction:
         """dReal's delta precision: no frontier is meaningful below it."""
-        try:
-            return Fraction(self._config.get_section("dreal").get_value("precision"))
-        except Exception:
-            return Fraction("0.001")
+        return backend_precision(self._config, "dreal")
 
     def rv(self, f: Fraction) -> RealVal:
         # dReal3's SMT2 parser has no p/q literal: str(Fraction("3.95")) is
