@@ -103,6 +103,28 @@ class dRealSolver(ParallelSMTSolver):
         self._parallel_s_time = 0.0
         self._parallel_e_time = 0.0
         self.file_name = ""
+        # The delta to run the binary at, or None to leave it at the binary's
+        # own default. Callers that do not set it get the command line this
+        # solver has always issued.
+        self._precision = None
+
+    def set_precision(self, precision):
+        """Run the binary at ``precision`` rather than at its own default.
+
+        The [dreal] section is read by this class for the ODE settings and the
+        executable path, but the delta was never passed on, so a configured
+        value described the run without reaching it. It is set explicitly
+        rather than read from the section here, because a caller that has not
+        asked for a delta must keep the command line it had.
+        """
+        self._precision = None if precision is None else float(precision)
+
+    def _solver_args(self, exec_path, model_file_name):
+        """The binary's command line for one query."""
+        args = [exec_path, model_file_name, "--short_sat", "--model"]
+        if self._precision is not None:
+            args += ["--precision", repr(self._precision)]
+        return args
 
     def set_logic(self, logic_name: str):
         self._logic = (logic_name.upper() if logic_name.upper() in self._logic_list else 'QF_NRA_ODE')
@@ -342,7 +364,7 @@ class dRealSolver(ParallelSMTSolver):
 
         self._parallel_s_time = time.time()
         proc = subprocess.Popen(
-            [exec_path, model_file_name, "--short_sat", "--model"],
+            self._solver_args(exec_path, model_file_name),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE)
 
@@ -430,9 +452,7 @@ class dRealSolver(ParallelSMTSolver):
 
         model_file_name = "{}.smt2".format(str_file_name)
         proc = await asyncio.create_subprocess_exec(
-            exec_path, model_file_name,
-            "--short_sat",
-            "--model",
+            *self._solver_args(exec_path, model_file_name),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE)
 
