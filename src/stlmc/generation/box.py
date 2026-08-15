@@ -492,6 +492,33 @@ def _verdict(pool, any_unresolved, settled, max_depth):
                                             "heuristic-assisted exhaustion")
 
 
+def _face_tol(oracle, theta: _Theta, var: Variable, iters: int) -> Fraction:
+    """Face precision for one axis, floored by the oracle's tolerance.
+
+    Two points closer than this are points the search cannot tell apart, so it
+    is also the radius at which a face marker is merged into a witness rather
+    than admitted beside it. Both uses resolve here so they cannot diverge.
+    """
+    target = (theta.of(var) / (2 ** iters)
+              if getattr(oracle, "is_exact", True) else theta.of(var) / 8)
+    return max(oracle.tolerance, target)
+
+
+def _coincides_with(marker, pool, ic_vars, tol) -> int | None:
+    """Index of the first pooled witness within ``tol`` of ``marker``, or None.
+
+    The cross-box half of the one-entry-per-initial-condition rule.
+    :func:`_merge_markers` applies it inside a box; this applies it against the
+    witnesses earlier boxes at the same depth contributed, which that call
+    cannot see. ``tol`` is a callable ``var -> Fraction``.
+    """
+    for index, witness in enumerate(pool):
+        if all(abs(_value_of(marker, v) - _value_of(witness, v)) <= tol(v)
+               for v in ic_vars):
+            return index
+    return None
+
+
 def _merge_markers(witnesses, labels, markers, marker_labels, ic_vars, tol,
                    printer) -> int:
     """Append face markers, merging any that land on a witness already collected.
@@ -1068,12 +1095,10 @@ class RegionBoxDiscovery(Algorithm):
             raise RuntimeError("no initial-condition variables (<name>_0_0) found")
         box = {v: [p, p] for v, p in ic.items()}
         ranges = _ic_ranges(box, encoding.range_dict)
-        exact = getattr(oracle, "is_exact", True)
 
         def tol_of(v):
-            """Face precision for one axis, floored by the oracle's tolerance."""
-            target = theta.of(v) / (2 ** iters) if exact else theta.of(v) / 8
-            return max(oracle.tolerance, target)
+            return _face_tol(oracle, theta, v, iters)
+        self._tol_of = tol_of      # the same tolerance the caller merges against
         witnesses, labels = [pivot], [_DEEP]
         markers, marker_labels, calls, unresolved = [], [], 0, False
 
@@ -1320,6 +1345,10 @@ class RegionBoxDiscovery(Algorithm):
             # falsifying at several depths is the depth axis, not redundancy --
             # so neither rule reaches beyond the depth it is applied in.
             depth_pool: list[dict[Variable, Constant]] = []
+            # depth_pool and pool are appended in lockstep from here, so index
+            # i of the former is index depth_offset + i of the latter -- which
+            # is what lets a marker relabel an entry an earlier box contributed.
+            depth_offset = len(pool)
             # Both caveats on an exhaustion claim are scoped to a depth, since
             # the structure space and its blocks are -- and so is the metrics
             # line, which is printed under a per-depth label and previously
@@ -1406,26 +1435,42 @@ class RegionBoxDiscovery(Algorithm):
 
                 kept = 0
                 collapsed_across = 0
-                # Earlier boxes at this depth only. _grow_box already separates
-                # a box's own deep witnesses from each other, so checking
-                # against a snapshot rather than the live list leaves the
-                # single-box case exactly as it was and adds only the
-                # cross-box rule.
+                merged_across = 0
+                # Earlier boxes at this depth only. _grow_box already applies
+                # both admission rules within a box, so checking against a
+                # snapshot rather than the live list leaves the single-box case
+                # exactly as it was and adds only the cross-box half.
                 prior_here = list(depth_pool)
+                tol_of = self._tol_of
                 for witness, label in zip(witnesses, box_labels):
-                    # Both rules apply to deep (interior) witnesses only;
-                    # boundary and domain markers mark the frontier, and their
-                    # position is the information they carry, so they are always
-                    # kept.
-                    if label == _DEEP and _within_theta(
-                        witness, prior_here, box.keys(), theta
-                    ):
-                        collapsed_across += 1
-                        continue
-                    if thin > 0 and label == _DEEP and _too_close(
-                        witness, depth_pool, box.keys(), thin
-                    ):
-                        continue
+                    if label == _DEEP:
+                        # Separation: a deep witness within theta of one an
+                        # earlier box at this depth contributed carries nothing
+                        # the pool does not already have.
+                        if _within_theta(witness, prior_here, box.keys(), theta):
+                            collapsed_across += 1
+                            continue
+                        if thin > 0 and _too_close(
+                            witness, depth_pool, box.keys(), thin
+                        ):
+                            continue
+                    else:
+                        # One entry per initial condition: a marker landing on a
+                        # witness an earlier box already contributed relabels it
+                        # rather than adding a second entry for the same point.
+                        # Markers are exempt from separation, not from this --
+                        # two boxes at one depth can converge on the same face,
+                        # and without the check the pool carries the same
+                        # initial condition twice, at distance zero on every
+                        # axis the metrics measure.
+                        hit = _coincides_with(
+                            witness, prior_here, box.keys(), tol_of)
+                        if hit is not None:
+                            merged_across += 1
+                            at = depth_offset + hit
+                            if labels[at] == _DEEP:
+                                labels[at] = label
+                            continue
                     depth_pool.append(witness)
                     pool.append(witness)
                     labels.append(label)
@@ -1435,6 +1480,11 @@ class RegionBoxDiscovery(Algorithm):
                         f"[kappa_box] {collapsed_across} deep witness(es) of "
                         f"this box landed within theta of a witness an earlier "
                         f"box at depth {depth} contributed and were dropped")
+                if merged_across:
+                    printer.print_verbose(
+                        f"[kappa_box] {merged_across} marker(s) coincided with a "
+                        f"witness an earlier box at depth {depth} contributed "
+                        f"and were merged into it")
 
                 # Block the box extended by theta on every face. At convergence
                 # the point theta beyond each face is non-falsifying, so extending
