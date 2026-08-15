@@ -34,7 +34,7 @@ common {{
 }}
 gen {{
     epsilon = {epsilon}
-    k-ic    = 1
+    k-ic    = {k_ic}
     {extra}
 }}
 """
@@ -42,10 +42,10 @@ gen {{
 THETA = Fraction(1, 100)
 
 
-def run_box(tmp_path, epsilon=THETA, extra="depths = 2", goal="f2"):
+def run_box(tmp_path, epsilon=THETA, extra="depths = 2", goal="f2", k_ic=1):
     """One kappa_box run in an isolated directory; returns (stdout, pool path)."""
     cfg = tmp_path / "box.cfg"
-    cfg.write_text(CFG.format(epsilon=float(epsilon), extra=extra))
+    cfg.write_text(CFG.format(epsilon=float(epsilon), extra=extra, k_ic=k_ic))
     env = dict(os.environ, PYTHONPATH=SRC, PYTHONHASHSEED="0")
     proc = subprocess.run(
         [sys.executable, "-c",
@@ -249,3 +249,81 @@ def test_zero_epsilon_fails_fast_with_the_key_named(tmp_path):
     stdout, pool = run_box(tmp_path, epsilon=0)
     assert "[gen] epsilon" in stdout and "must be > 0" in stdout, stdout
     assert pool is None
+
+
+def deep_pairs_within_theta(payload, axes=("x1_0_0", "x2_0_0"), theta=None):
+    """Pairs of deep witnesses that are within ``theta`` on every axis."""
+    theta = THETA if theta is None else theta
+    labels = payload[9]
+    columns = {v: ic_values(payload, v) for v in axes}
+    columns = {v: col for v, col in columns.items() if col}
+    deep = [i for i, label in enumerate(labels) if label == "deep"]
+    close = []
+    for a_index in range(len(deep)):
+        for b_index in range(a_index + 1, len(deep)):
+            i, j = deep[a_index], deep[b_index]
+            gap = max(abs(col[i] - col[j]) for col in columns.values())
+            if gap < theta:
+                close.append((i, j, float(gap)))
+    return close
+
+
+def test_separation_holds_across_boxes_at_one_depth(tmp_path):
+    """theta separates the witnesses of a DEPTH, not of a box.
+
+    Growth runs unmasked, so a second box at the same depth may regrow across
+    the first and place a lattice centre arbitrarily close to a witness the
+    first contributed. Checking a box against itself cannot see that, which is
+    why every other separation assertion here runs at k-ic = 1.
+    """
+    stdout, pool = run_box(
+        tmp_path, k_ic=3,
+        extra="depths = 2\n    k-witness = 3\n    bisect-iters = 4")
+    assert pool is not None, stdout
+    with open(pool, "rb") as handle:
+        payload = pickle.load(handle)
+    assert stdout.count("box ") > 1, "this test needs more than one box\n" + stdout
+    close = deep_pairs_within_theta(payload)
+    assert not close, f"deep witnesses closer than theta at one depth: {close[:5]}"
+
+
+def test_separation_is_not_imposed_across_depths(tmp_path):
+    """...and only of a depth: an initial condition may recur at another one.
+
+    A region falsifying at several depths contributes a box at each, which is
+    the depth axis rather than redundancy. Since separation now holds within
+    every depth, any pair closer than theta is necessarily a cross-depth pair,
+    so their presence is what shows the axis survived.
+    """
+    stdout, pool = run_box(
+        tmp_path, k_ic=3,
+        extra='depths = "1/2"\n    k-witness = 3\n    bisect-iters = 4')
+    assert pool is not None, stdout
+    with open(pool, "rb") as handle:
+        payload = pickle.load(handle)
+    assert "over 2 target depth(s)" in stdout, stdout
+    assert deep_pairs_within_theta(payload), (
+        "no initial condition recurred across depths, so this run cannot "
+        "distinguish per-depth separation from global separation\n" + stdout)
+
+
+def test_thinning_does_not_reach_across_depths(tmp_path):
+    """[gen] thin-ic is a coarser rule under the same scope as theta.
+
+    Thinning against the whole pool removes exactly the cross-depth repetition
+    depth-spreading exists to produce, so a radius above theta would silently
+    cost the depth axis rather than only the intra-depth redundancy it is meant
+    to control.
+    """
+    stdout, pool = run_box(
+        tmp_path, k_ic=3,
+        extra=('depths = "1/2"\n    k-witness = 3\n    bisect-iters = 4'
+               '\n    thin-ic = 0.05'))
+    assert pool is not None, stdout
+    with open(pool, "rb") as handle:
+        payload = pickle.load(handle)
+    assert "over 2 target depth(s)" in stdout, stdout
+    close = deep_pairs_within_theta(payload, theta=Fraction(1, 20))
+    assert close, (
+        "thin-ic removed every witness pair within its own radius, so it is "
+        "still being applied across depths\n" + stdout)
