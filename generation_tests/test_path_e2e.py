@@ -247,3 +247,13 @@ def test_a_zero_budget_settles_nothing_and_says_so(tmp_path):
     assert "result : True" not in stdout, stdout
     assert "result : Unknown" in stdout
     assert "were not decided" in stdout
+
+def test_a_pool_with_no_labels_still_records_the_relaxation(radius_one):
+    """The two trailing pool elements are positional, so a strategy that has no
+    per-counterexample labels contributes an empty list rather than omitting the
+    slot -- otherwise the relaxation would land where a consumer reads labels.
+    """
+    _, payload = radius_one
+    assert len(payload) == 11
+    assert payload[9] == [], "kappa_path has no label vocabulary"
+    assert payload[10] == 0.0, "the exact backend answers under no relaxation"
