@@ -279,6 +279,30 @@ def z3_logic(config) -> str:
     return "LRA"
 
 
+#: The delta a delta-decision backend runs at when nothing sets it. dReal3's
+#: own compiled default, so an absent ``[dreal] precision`` and this value name
+#: the same run.
+DEFAULT_BACKEND_PRECISION = Fraction("1/1000")
+
+
+def backend_precision(config, solver: str) -> Fraction:
+    """The relaxation the backend answers under, as a non-negative Fraction.
+
+    Zero for an exact backend, where a satisfying answer is a model. On a
+    delta-decision backend it is ``[dreal] precision``, and it is what makes a
+    pool self-describing: a witness is a point in a region the backend accepted
+    up to this value, so a consumer that does not know it cannot tell a witness
+    from a candidate. Resolved in one place so the face tolerance that floors a
+    frontier and the value recorded beside a pool cannot disagree.
+    """
+    if str(solver).strip().lower() != "dreal":
+        return Fraction(0)
+    try:
+        return Fraction(config.get_section("dreal").get_value("precision"))
+    except Exception:
+        return DEFAULT_BACKEND_PRECISION
+
+
 def resolve_seed(config, printer=None) -> int:
     """The generation seed: -gen-seed if given (>= 0), else PYTHONHASHSEED.
 
