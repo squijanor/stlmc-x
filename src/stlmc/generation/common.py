@@ -289,18 +289,37 @@ def backend_precision(config, solver: str) -> Fraction:
     """The relaxation the backend answers under, as a non-negative Fraction.
 
     Zero for an exact backend, where a satisfying answer is a model. On a
-    delta-decision backend it is ``[dreal] precision``, and it is what makes a
-    pool self-describing: a witness is a point in a region the backend accepted
-    up to this value, so a consumer that does not know it cannot tell a witness
-    from a candidate. Resolved in one place so the face tolerance that floors a
-    frontier and the value recorded beside a pool cannot disagree.
+    delta-decision backend it is ``[dreal] precision``, and it is three things
+    at once: the value passed to the solver, the floor under any frontier the
+    geometry locates, and what makes a pool self-describing, since a witness is
+    a point in a region accepted up to this value. Resolved in one place so
+    those three cannot name different runs.
+
+    An absent key is the backend's own default, so an unset configuration and
+    the default describe the same run. A present one must be a positive finite
+    number: zero or a negative relaxation has no reading, and silently
+    substituting the default for one would report a run that did not happen.
     """
     if str(solver).strip().lower() != "dreal":
         return Fraction(0)
-    try:
-        return Fraction(config.get_section("dreal").get_value("precision"))
-    except Exception:
+    if config is None or not config.is_section_in("dreal"):
         return DEFAULT_BACKEND_PRECISION
+    section = config.get_section("dreal")
+    if not section.is_argument_in("precision"):
+        return DEFAULT_BACKEND_PRECISION
+    raw = str(section.get_value("precision")).strip().strip('"')
+    try:
+        value = Fraction(raw)
+    except (ValueError, ZeroDivisionError, ArithmeticError) as exc:
+        raise ValueError(
+            f'[dreal] precision = "{raw}" is not a number'
+        ) from exc
+    if value <= 0:
+        raise ValueError(
+            f"[dreal] precision = {raw} must be positive; it is the "
+            f"relaxation the backend answers under"
+        )
+    return value
 
 
 def resolve_seed(config, printer=None) -> int:
