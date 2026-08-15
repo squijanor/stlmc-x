@@ -42,7 +42,11 @@ class ConfigVisitor(configVisitor):
         }
         self.type_check_dict["z3"] = {("logic", frozenset({"QF_NRA", "QF_LRA"}))}
         self.type_check_dict["yices"] = {("logic", frozenset(["QF_NRA", "QF_LRA"]))}
-        self.type_check_dict["dreal"] = {("ode-order", "float"), ("ode-step", "float"), ("executable-path", "path")}
+        # precision is type-checked but not mandatory: absent means the
+        # backend's own default, and the generation strategies additionally
+        # require it to be positive when it is set.
+        self.type_check_dict["dreal"] = {("ode-order", "float"), ("ode-step", "float"),
+                                         ("precision", "float"), ("executable-path", "path")}
         self.type_check_dict["gen"] = {
             ("radius", "integer"),
             ("epsilon", "float"),
