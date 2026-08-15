@@ -88,6 +88,7 @@ from ..constraints.operations import substitution_zero2t
 from ..objects.algorithm import Algorithm
 from .common import (
     MODE_RE,
+    backend_precision,
     gen_depths,
     gen_float,
     gen_frac,
@@ -1285,6 +1286,16 @@ class RegionBoxDiscovery(Algorithm):
             "[kappa_box] query-timeout={} per solver call "
             "([gen] query-timeout = 0 disables)".format(
                 "off" if bound is None else f"{bound}s"))
+
+        # The delta the backend answers under, echoed on the delta path
+        # because it now reaches the binary: a run's frontiers, its pool's
+        # recorded relaxation and its solver calls are all this one value, and
+        # a configured value that fails to arrive is otherwise invisible.
+        if underlying == "dreal":
+            printer.print_normal(
+                f"[kappa_box] backend precision="
+                f"{float(backend_precision(config, underlying))} "
+                f"per solver call ([dreal] precision)")
 
         encoder = Encoder(model, goal, prop_dict, delta, tau_max)
         pool: list[dict[Variable, Constant]] = []
