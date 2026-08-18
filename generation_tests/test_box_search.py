@@ -1206,3 +1206,145 @@ def test_ic_pivots_are_sorted_by_variable_id():
     model = assn(c_0_0=3, a_0_0=1, b_0_0=2)
     assert [v.id for v in _ic_pivots(model, range_dict)] == [
         "a_0_0", "b_0_0", "c_0_0"]
+
+
+# ============================================= partial-face witness separation
+
+class TestPartialFaceWitnessSeparation:
+    """A partial face contributes a deep witness, not an exempt marker.
+
+    It is labeled deep because no frontier was located, so it must be held to
+    the same theta separation as any other deep witness. Entering it through the
+    marker merge -- which is exempt from separation, since a frontier marker's
+    position is the information it carries -- let a partial-face witness sit
+    within theta of the pivot it grew from.
+    """
+
+    @staticmethod
+    def _encoding():
+        class _Enc:
+            range_dict = {Real("x"): (True, "0", "10", True)}
+            bound = 1
+        return _Enc()
+
+    def _grow(self, oracle, theta):
+        alg = RegionBoxDiscovery()
+        alg._config = None
+        return alg._grow_box(oracle, assn(x_0_0=5), self._encoding(),
+                             theta, 20, 1, 4, _SilentPrinter())
+
+    def test_a_partial_witness_within_theta_of_the_pivot_is_dropped(self, x):
+        # Undecided at or beyond 5.7 lets the +face confirm a little growth (to
+        # ~5.6) and then stop partial, within theta = 1 of the pivot at 5. The
+        # partial witness carries nothing the pivot does not and must be dropped.
+        oracle = FakeOracle({x: (Fraction(4), Fraction(6))},
+                            undecided=beyond(x, Fraction(57, 10)),
+                            tolerance=Fraction(1, 1000))
+        witnesses, labels, _ = self._grow(oracle, _Theta(Fraction(1)))
+        deep = sorted(_value_of(w, x)
+                      for w, label in zip(witnesses, labels) if label == _DEEP)
+        gaps = [b - a for a, b in zip(deep, deep[1:])]
+        assert all(g >= Fraction(1) for g in gaps), (
+            "deep witnesses closer than theta: "
+            f"{[float(d) for d in deep]}")
+
+    def test_an_exempt_frontier_marker_within_theta_still_survives(self, x):
+        # The -face brackets a real frontier near 4; its boundary marker is
+        # exempt from separation and must be kept even on a narrow box, since its
+        # position is the frontier it reports.
+        oracle = FakeOracle({x: (Fraction(4), Fraction(6))},
+                            undecided=beyond(x, Fraction(57, 10)),
+                            tolerance=Fraction(1, 1000))
+        _, labels, _ = self._grow(oracle, _Theta(Fraction(1)))
+        assert _BOUNDARY in labels, "an exempt frontier marker must survive"
+
+
+# ================================================= harvest window delta floor
+
+class _WindowRecorder(FakeOracle):
+    """Records the width of every per-axis window a check() is issued under."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.widths = []
+
+    def check(self):
+        for _var, (lo, hi) in self._window().items():
+            if lo is not None and hi is not None:
+                self.widths.append(hi - lo)
+        return super().check()
+
+
+class TestHarvestWindowDeltaFloor:
+    """Def. harvest: the sampling window has width >= delta.
+
+    Under a delta backend a window narrower than delta forfeits the claim that a
+    returned point lies in the cell that was queried, which is the whole
+    justification for pinning every axis. theta can be finer than delta, so the
+    window floors at delta rather than following theta down. On an exact oracle
+    (tolerance 0) the floor is a no-op and the window is theta as before.
+    """
+
+    def test_lattice_window_is_floored_at_delta(self, x, y):
+        delta = Fraction(1, 1000)
+        theta = _Theta(Fraction(1, 1_000_000))       # far below delta
+        box = {x: [Fraction(0), Fraction(1)], y: [Fraction(0), Fraction(1)]}
+        oracle = _WindowRecorder({x: (Fraction(0), Fraction(10)),
+                                  y: (Fraction(0), Fraction(10))},
+                                 tolerance=delta)
+        RegionBoxDiscovery()._harvest_lattice(oracle, box, theta, 2, 200)
+        assert oracle.widths
+        assert min(oracle.widths) >= delta, (
+            f"window {float(min(oracle.widths))} is below delta {float(delta)}")
+
+    def test_an_exact_oracle_window_is_unchanged(self, x):
+        theta = _Theta(Fraction(1, 10))
+        box = {x: [Fraction(0), Fraction(1)]}
+        oracle = _WindowRecorder({x: (Fraction(0), Fraction(10))},
+                                 tolerance=Fraction(0))
+        oracle.is_exact = True
+        RegionBoxDiscovery()._harvest_lattice(oracle, box, theta, 8, 200)
+        assert oracle.widths and max(oracle.widths) == Fraction(1, 10)
+
+
+# ================================================== two-step backend capability
+
+class TestTwoStepBackendGuard:
+    """The two-step pivot search is sound only under dReal.
+
+    Its outer level asserts the segment-duration timing identities and the
+    endpoint instantiation of quantified subformulas -- necessary conditions of
+    the delta query, not of the encoding -- which hold only under a backend that
+    realizes a closed segment interval and the injected clock dynamics. The
+    dispatch guards that capability rather than inferring it from "not z3".
+    """
+
+    def test_a_foreign_backend_is_refused(self):
+        alg = _ScriptedExact(SAT)
+        alg._underlying = "yices"
+        alg._config = _GenConfig()
+        try:
+            alg._pivot_at(_OneDepthEncoder(), 0, "LRA", 0, [])
+        except ValueError as error:
+            assert "dreal" in str(error)
+        else:
+            raise AssertionError("a non-z3, non-dreal backend must be refused")
+
+    def test_the_exact_backend_is_unaffected(self):
+        alg = _ScriptedExact(SAT)
+        alg._underlying = "z3"
+        alg._config = _GenConfig()
+        _, pivot, _ = alg._pivot_at(_OneDepthEncoder(), 0, "LRA", 0, [])
+        assert pivot is not None
+
+    def test_dreal_still_takes_the_two_step_path(self):
+        alg = _ScriptedTwoStep(["01"], [SAT])
+        alg._printer = _SilentPrinter()
+        alg._config = _GenConfig(pivot_budget="30")
+        alg._logger = None
+        alg._tau_max = "8"
+        alg._underlying = "dreal"
+        alg._time_horizon = 8.0
+        alg._metrics = _Counter()
+        _, model, _ = alg._pivot_at(_OneDepthEncoder(), 0, "LRA", 0, [])
+        assert model is not None, "dreal must route through the two-step search"
