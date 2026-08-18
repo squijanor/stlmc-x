@@ -253,3 +253,105 @@ class TestWordIntegrity:
         assignment = {Real("currentMode_0"): RealVal("1.000000"),
                       Real("currentMode_1"): RealVal("2")}
         assert _off_lattice(_location_word(assignment)) == []
+
+
+class TestArityGuard:
+    """A depth-n word has one position per step, k = 0..n. A backend can return
+    a model that omits a step's mode variable, and a radius-0 block over the
+    positions present coarsens to a disjunction excluding every word that agrees
+    on them -- words never exhibited as counterexamples. A short-arity model is
+    therefore not blocked and not pooled: the depth stops UNRESOLVED and the run
+    continues, exactly as the off-lattice case does."""
+
+    def test_a_missing_position_is_detected(self):
+        from stlmc.generation.pathenum import _location_word, _missing_modes
+
+        word = _location_word({Int("currentMode_0"): IntVal("0")})
+        assert _missing_modes(word, depth=1) == ["currentMode_1"]
+
+    def test_a_full_arity_word_is_not_flagged(self):
+        from stlmc.generation.pathenum import _location_word, _missing_modes
+
+        word = _location_word({Int("currentMode_0"): IntVal("0"),
+                               Int("currentMode_1"): IntVal("2")})
+        assert _missing_modes(word, depth=1) == []
+
+    def test_every_position_missing_is_reported_in_step_order(self):
+        from stlmc.generation.pathenum import _missing_modes
+
+        assert _missing_modes([], depth=2) == [
+            "currentMode_0", "currentMode_1", "currentMode_2"]
+
+    def test_a_short_model_drives_run_to_unresolved(self, monkeypatch):
+        """The whole guard, at run() level: a SAT model short of its arity is
+        not pooled, the depth stops UNRESOLVED with a notice naming the missing
+        position, and the verdict is Unknown. A scripted oracle injects the
+        short model, since a real backend does not omit a mode variable."""
+        import stlmc.generation.pathenum as pathenum
+        from stlmc.constraints.constraints import BoolVal
+        from stlmc.generation.oracle import SAT
+        from stlmc.objects.configuration import Configuration, Section
+
+        short = {Int("currentMode_0"): IntVal("0")}  # depth 1 wants _0 and _1
+
+        class _Oracle:
+            def assert_(self, formula):
+                pass
+
+            def check(self):
+                return SAT
+
+            def model(self):
+                return dict(short)
+
+            def unknown_reason(self):
+                return None
+
+        class _Encoding:
+            consts = BoolVal("true")
+
+        class _Encoder:
+            def __init__(self, *a, **k):
+                pass
+
+            def encode_at(self, depth):
+                return _Encoding()
+
+            def reset(self):
+                pass
+
+        class _Printer:
+            def __init__(self):
+                self.lines = []
+
+            def print_normal(self, msg):
+                self.lines.append(msg)
+
+            def print_verbose(self, msg):
+                self.lines.append(msg)
+
+        monkeypatch.setattr(pathenum, "make_oracle", lambda *a, **k: _Oracle())
+        monkeypatch.setattr(pathenum, "Encoder", _Encoder)
+
+        cfg = Configuration()
+        common = Section()
+        common.name = "common"
+        common.arguments = {"bound": "1", "time-bound": "8",
+                            "threshold": "0.1", "solver": "z3",
+                            "gen-seed": "0"}
+        cfg.add_section(common)
+        gen = Section()
+        gen.name = "gen"
+        gen.arguments = {"depths": "1"}
+        cfg.add_section(gen)
+
+        printer = _Printer()
+        result, _elapsed, _bound, pool = pathenum.DiscretePathEnum().run(
+            None, None, None, cfg, None, None, printer)
+
+        assert pool == [], "a short-arity model must not be pooled"
+        assert result == "Unknown"
+        guard = [ln for ln in printer.lines if "cannot block this model" in ln]
+        assert guard, printer.lines
+        assert "missing currentMode_1" in guard[0]
+        assert "UNRESOLVED" in guard[0]
