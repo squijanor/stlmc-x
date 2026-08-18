@@ -7,16 +7,20 @@ initial condition exists at least theta beyond the current bound, and stops when
 the falsifying region ends within theta (NEG-only). theta both guarantees
 termination over a continuous region and spaces the witnesses.
 
-Each witness is labeled by where it sits in the falsifying set. The interior
-witnesses collected during growth are ``deep``. After a box's growth converges,
-each face is examined once: if the falsifying set reaches the variable's declared
-range edge, the face's marker is ``domain`` (the extent is the model domain, not
-the falsifying frontier); otherwise the frontier is strictly interior and is
-located by bisecting the theta-gap between the last falsifying bound and the
-first non-falsifying point, giving a ``boundary`` marker at the frontier. On a
-fixed mode path with linear dynamics the falsifying initial-condition set is a
-convex polytope, so this bisection locates the exact frontier without a positive
-(quantified) encoding.
+Each face search asks a directional question -- "is there a falsifying initial
+condition at or beyond m on this axis" -- so a located bound is a lower bound on
+the directional supremum of the falsifying extent, not a certified coordinate,
+and the grown rectangle is a coordinate-wise search-and-harvest envelope, not a
+subset of the falsifying set. Witnesses are labeled by how their face resolved.
+The interior witnesses collected during growth are ``deep``. After a box's growth
+converges, each face is examined once: if a falsifying initial condition is
+exhibited at the variable's declared range edge, the face's marker is ``domain``
+(the observable extent is the model domain, not a falsifying frontier); otherwise
+the search brackets the directional bound between a confirmed falsifying value
+and a confirmed non-falsifying one, giving a ``boundary`` marker there.
+Bracketing locates where directional support ends, which coincides with the
+falsifying frontier only when the falsifying set is convex along the ray;
+convexity is an assumption, not a consequence of pinning the structure.
 
 Both backends are supported. On an exact backend a face advances by theta-wide
 steps and the frontier is located by bisection. On a delta-decision backend the
@@ -27,14 +31,16 @@ solver calls is set by an explicit budget rather than by the box extent.
 Depth traversal. The strategy visits a set of target depths -- ``[gen] depths``
 as a slash-separated list (e.g. ``"7/8"``), or every depth 1..N by default -- and
 explores each independently. At a target depth it grows a box, labels it, blocks
-its region (the box extended by theta on every face, so no falsifying sliver is
-left between the theta-quantized box and the true frontier), and re-pivots
-outside the blocked regions of that depth, up to the per-depth budget ``[gen]
-k-ic``; absent or 0, the depth is explored to exhaustion. The blocks are per depth:
-each target depth discovers its own falsifying regions, so a region falsifying at
-several depths contributes a counterexample (with a different mode path) at each,
-making depth a first-class diversity axis rather than an incidental by-product of
-re-pivoting. The returned pool is the union over target depths.
+the envelope (the box extended by theta on every face), and re-pivots outside the
+blocked envelopes of that depth, up to the per-depth budget ``[gen] k-ic``;
+absent or 0, the depth is explored to exhaustion. Blocking the envelope is a
+coverage heuristic: the envelope is not a subset of the falsifying set and may
+bridge several falsifying components, so re-pivoting is not guaranteed to recover
+a disconnected region as a separate box. The blocks are per depth: each target
+depth discovers its own regions, so a region falsifying at several depths
+contributes a counterexample (with a different mode path) at each, making depth a
+first-class diversity axis rather than an incidental by-product of re-pivoting.
+The returned pool is the union over target depths.
 
 Separation is per depth. theta is the minimum separation of the witnesses a
 depth contributes, not merely of the witnesses one box contributes: growth runs
@@ -831,7 +837,22 @@ class RegionBoxDiscovery(Algorithm):
         The returned oracle carries the encoding and the blocks, ready for growth;
         the caller resets the encoder after using the returned encoding."""
         encoding = encoder.encode_at(depth)
-        if getattr(self, "_underlying", "z3") != "z3":
+        underlying = getattr(self, "_underlying", "z3")
+        if underlying != "z3":
+            # The two-step search asserts facts that are necessary conditions of
+            # the delta query rather than of the encoding -- the segment-duration
+            # timing identities and the endpoint instantiation of quantified
+            # subformulas -- and these hold only under a backend that realizes a
+            # closed segment interval and the injected clock dynamics. Guard that
+            # capability explicitly here, rather than letting the soundness of
+            # the two-step arm rest on the dispatch happening to route every
+            # non-exact backend to it.
+            if underlying != "dreal":
+                raise ValueError(
+                    "the two-step pivot search is sound only under the dreal "
+                    "backend, whose closed-interval and clock realization the "
+                    "asserted timing and endpoint facts depend on; backend "
+                    f"'{underlying}' cannot take it")
             return self._pivot_two_step(encoding, logic, seed, blocks)
         # Only the exact backend reaches here; a delta backend always takes the
         # two-step path above.
@@ -883,8 +904,18 @@ class RegionBoxDiscovery(Algorithm):
             oracle.pop()
 
     def _search_face(self, oracle, var, others, start, wall, tol):
-        """Largest falsifying value of ``var`` in ``[start, wall]`` (or smallest,
-        when ``wall < start``), to within ``tol``.
+        """Directional support bound for ``var`` towards ``wall``: the largest
+        ``m`` for which a falsifying initial condition was exhibited at or beyond
+        ``m`` (or the smallest, when ``wall < start``), to within ``tol``.
+
+        The probe (:func:`falsifying_beyond`) is existential-beyond -- it asks
+        whether a falsifying IC exists with the coordinate at or past ``m``, not
+        whether ``m`` itself falsifies -- so the returned bound is a LOWER BOUND
+        on the directional supremum of the falsifying extent, never a certified
+        coordinate. The rectangle grown from it is a coordinate-wise search-and-
+        harvest envelope, not a subset of the falsifying set: harvest re-queries
+        each cell before keeping a witness, so individual witnesses stay valid,
+        but the region between them is not asserted to falsify.
 
         Logarithmic in the extent instead of linear in extent/theta, and it never
         reads UNKNOWN as a frontier. Returns ``(bound, status, calls)`` with
@@ -893,14 +924,16 @@ class RegionBoxDiscovery(Algorithm):
         An UNKNOWN answer is local: failing to decide whether a falsifying IC
         exists beyond one point says nothing about the points on either side, so
         the search retries nearer the confirmed side rather than abandoning the
-        face. ``lo`` is always a value the solver confirmed falsifying, so a
-        face that stops early yields a smaller box, never a wrong one:
+        face. ``lo`` always satisfies the existential-beyond probe, so a face that
+        stops early yields a smaller envelope, never a wrong witness:
 
-            domain      the falsifying set reaches the declared range edge.
-            frontier    bracketed between a confirmed falsifying value and a
-                        confirmed non-falsifying one, to within tol.
+            domain      a falsifying IC is exhibited at the declared range edge.
+            frontier    the directional bound is bracketed between a confirmed
+                        beyond-falsifying value and a confirmed non-falsifying
+                        one, to within tol; the falsifying frontier itself only
+                        under convexity along the ray.
             partial     grew beyond the pivot but never bracketed. The bound is
-                        a LOWER BOUND on the extent, not the frontier.
+                        a LOWER BOUND on the directional support, not a frontier.
             unresolved  no probe beyond the pivot was decided. No growth.
         """
         up = wall > start
@@ -964,6 +997,9 @@ class RegionBoxDiscovery(Algorithm):
         span = hi - lo
         if span <= 0 or budget <= 0:
             return out, 0, 0
+        # Def. harvest: the sampling window has width >= delta (the oracle's
+        # tolerance); half is that width / 2, so floor it at delta / 2.
+        half = max(half, oracle.tolerance / 2)
         n = min(budget, max(1, int(span / theta)))
         undecided = 0
         for i in range(n):
@@ -1014,7 +1050,11 @@ class RegionBoxDiscovery(Algorithm):
             # every other axis, and a box was returned as pivot + markers with
             # k-witness inert.
             cells[var] = min(budget, max(1, int(span / th)))
-            half[var] = th / 2
+            # Def. harvest requires the sampling window w_j >= delta (the
+            # oracle's tolerance), theta by default; half is w_j / 2. A window
+            # narrower than delta forfeits the claim that a returned point lies
+            # in the queried cell, which is what pinning every axis buys.
+            half[var] = max(th, oracle.tolerance) / 2
 
         total = 1
         for var in axes:
@@ -1101,6 +1141,10 @@ class RegionBoxDiscovery(Algorithm):
         self._tol_of = tol_of      # the same tolerance the caller merges against
         witnesses, labels = [pivot], [_DEEP]
         markers, marker_labels, calls, unresolved = [], [], 0, False
+        # A partial face contributes a deep witness (no frontier was located),
+        # collected here and held to theta separation like any deep witness --
+        # not routed through the marker merge, which is exempt from separation.
+        deep_markers: list[dict[Variable, Constant]] = []
 
         for var in box:
             tol = tol_of(var)
@@ -1149,12 +1193,13 @@ class RegionBoxDiscovery(Algorithm):
                     if status == "partial":
                         # The deepest confirmed point is still a counterexample;
                         # it is labeled deep rather than boundary precisely
-                        # because it is not known to be on the frontier.
+                        # because it is not known to be on the frontier. As a
+                        # deep witness it is subject to theta separation, so it
+                        # goes to deep_markers rather than the exempt marker list.
                         m = self._window_witness(oracle, var, others, bound, tol)
                         calls += 1
                         if m is not None:
-                            markers.append(m)
-                            marker_labels.append(_DEEP)
+                            deep_markers.append(m)
                     continue
                 m = self._window_witness(oracle, var, others, bound, tol)
                 calls += 1
@@ -1213,6 +1258,26 @@ class RegionBoxDiscovery(Algorithm):
                     collapsed, ", ".join(f"{v.id}={float(theta.of(v))}"
                                          for v in box)))
 
+        # Partial-face deep witnesses are separated exactly like harvested deep
+        # witnesses: one within theta of a witness already collected carries
+        # nothing new. Kept out of the marker merge below, which is exempt from
+        # separation because a frontier marker's position is its information.
+        dropped_partial = 0
+        for marker in deep_markers:
+            if any(all(abs(_value_of(marker, v) - _value_of(other, v))
+                       < theta.of(v)
+                       for v in box) for other in witnesses):
+                dropped_partial += 1
+                continue
+            witnesses.append(marker)
+            labels.append(_DEEP)
+        if dropped_partial:
+            printer.print_verbose(
+                "[kappa_box] {} partial-face witness(es) within theta ({}) of "
+                "an existing witness were dropped".format(
+                    dropped_partial, ", ".join(f"{v.id}={float(theta.of(v))}"
+                                               for v in box)))
+
         _merge_markers(witnesses, labels, markers, marker_labels, box, tol_of,
                        printer)
         printer.print_verbose(
@@ -1229,7 +1294,6 @@ class RegionBoxDiscovery(Algorithm):
         tau_max = float(common.get_value("time-bound"))
         delta = float(common.get_value("threshold"))
         underlying = common.get_value("solver")
-        # [SANDBOX RECONSTRUCTION] guard dropped so the dreal path can be exercised.
         self._underlying = underlying
         self._printer = printer
         _th = common.get_value("time-horizon") if common.is_argument_in(
@@ -1486,10 +1550,13 @@ class RegionBoxDiscovery(Algorithm):
                         f"witness an earlier box at depth {depth} contributed "
                         f"and were merged into it")
 
-                # Block the box extended by theta on every face. At convergence
-                # the point theta beyond each face is non-falsifying, so extending
-                # the block to it leaves no falsifying sliver between the
-                # theta-quantized box and the true frontier for a re-pivot.
+                # Block the envelope: the box extended by theta on every face.
+                # This is a coverage heuristic, not an exact exclusion of a
+                # falsifying region -- the envelope is a search-and-harvest
+                # rectangle, not a subset of the falsifying set, so it can also
+                # exclude falsifying initial conditions it bridges. A re-pivot
+                # must escape the envelope on some axis and is not guaranteed to
+                # recover a disconnected component as a separate box.
                 block_bounds = {v: (lo - theta.of(v), hi + theta.of(v))
                                 for v, (lo, hi) in box.items()}
                 blocks.append(_block_box(block_bounds, oracle.rv))
