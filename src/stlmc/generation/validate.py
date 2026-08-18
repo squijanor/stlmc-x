@@ -22,6 +22,21 @@ and Neg and nothing else, so it raises on any flow containing a square root or a
 trigonometric function; `_num` below covers the whole expression grammar. Atoms
 inside the formula are unaffected, as `robustness` evaluates those through sympy.
 
+A JUMP INSTANT BELONGS TO THE POST-JUMP SEGMENT
+
+Adjacent segments meet at a variable point tau: the flow of segment i ends at
+tau and the flow of segment i+1 begins at tau, and at a jump the two states
+differ -- always in the discrete variables, which change across every jump, and
+in a continuous variable wherever a reset is not the identity. A single instant
+cannot hold both. The reconstruction gives each variable point to the segment
+that begins at it -- the post-jump state -- so a jump at time t is evaluated in
+the mode entered at t. Concretely, every segment but the last contributes the
+half-open interval [tau_i, tau_{i+1}) by dropping its shared right endpoint; the
+last segment keeps its closed right endpoint, the end of the trace. A
+zero-duration segment therefore contributes no sample and cedes its instant to
+the next segment, and rho(0) is read at the first segment that carries a sample,
+so a jump at time 0 is read post-jump too.
+
 TWO THRESHOLDS, NOT ONE
 
 A verdict needs both of the tool's numbers, and they are different things.
@@ -56,7 +71,13 @@ READING A VERDICT
                     search was looking for -- a delta artifact, or a
                     reconstruction too coarse to see the violation (see the
                     sampling note below).
-    error           the trace could not be reconstructed at all.
+    error           the trace could not be reconstructed at all, or rho(0) is
+                    not a finite number. A non-finite rho(0) -- a divergent
+                    integration, or a 0/0 in a flow -- satisfies none of the
+                    band comparisons and must not be read as one: NaN fails
+                    every comparison and would fall through to `unverified`,
+                    and -inf compares below every edge and would read as a clean
+                    `falsifier`. It is routed here instead.
 
 SAMPLING IS PART OF THE MEASUREMENT, IN BOTH DIRECTIONS
 
@@ -96,6 +117,7 @@ import argparse
 import contextlib
 import csv
 import io
+import math
 import os
 import pickle
 import time
@@ -197,6 +219,34 @@ def _time_samples(projector: Projector, samples: int) -> List[List[float]]:
     return out
 
 
+def _own_post_jump(times: List[List[float]],
+                   point_samples: Dict[Variable, List[List[float]]],
+                   discrete_samples: Dict[Variable, List[List[float]]]) -> None:
+    """Give each variable point to the segment that begins at it.
+
+    Every segment but the last is restricted to the half-open interval
+    [tau_i, tau_{i+1}) by dropping the samples at or beyond its shared right
+    boundary, so the boundary instant survives only in the next (post-jump)
+    segment. The robustness lookup returns the first sample matching a time, so
+    with the pre-jump copy gone it reads the post-jump state there. The last
+    segment keeps its closed right endpoint, the end of the trace. A
+    zero-duration segment keeps no sample and cedes its instant to the next one.
+    `times`, `point_samples` and `discrete_samples` are edited in place, in
+    lockstep by segment index.
+    """
+    boundaries = [times[i + 1][0] if times[i + 1] else None
+                  for i in range(len(times) - 1)]
+    for i, boundary in enumerate(boundaries):
+        if boundary is None:
+            continue
+        keep = [k for k, t in enumerate(times[i]) if t < boundary]
+        times[i] = [times[i][k] for k in keep]
+        for series in point_samples.values():
+            series[i] = [series[i][k] for k in keep]
+        for series in discrete_samples.values():
+            series[i] = [series[i][k] for k in keep]
+
+
 # ---------------------------------------------------------------- validation
 
 def _reconstruct(assn, rest, samples: int):
@@ -224,10 +274,17 @@ def _reconstruct(assn, rest, samples: int):
         for v, vals in ds.generate_samples_at(times[index], index).items():
             discrete_samples.setdefault(v, []).append(vals)
 
+    _own_post_jump(times, point_samples, discrete_samples)
     return point_samples, discrete_samples, times
 
 
 def _classify(rho0: float, tau: float, backend_delta: float) -> str:
+    # A non-finite rho(0) -- a divergent integration, or a 0/0 in a flow -- is
+    # not a band: every comparison against NaN is False, so it would fall
+    # through to `unverified`, and -inf compares below every edge and would read
+    # as a clean `falsifier`. Route it out of the ordinary bands.
+    if not math.isfinite(rho0):
+        return "error"
     if rho0 < -backend_delta:
         return "falsifier"
     if rho0 < 0.0:
@@ -263,7 +320,13 @@ def validate_ce(assn, rest, tau: float, backend_delta: float, formula,
                           time_max, dp)
                for t in seg] for seg in times]
     flat = [x for seg in series for x in seg]
-    rho0 = series[0][0]
+    # rho(0) at the trace's initial instant, which post-jump ownership assigns
+    # to the first segment that carries a sample: a zero-duration leading
+    # segment holds none, so a jump at time 0 is read in the mode entered at 0.
+    first = next((i for i, seg in enumerate(series) if seg), None)
+    if first is None:
+        raise NotSupportedError("trace reconstruction produced no samples")
+    rho0 = series[first][0]
     return _classify(rho0, tau, backend_delta), rho0, min(flat), max(flat)
 
 
@@ -327,34 +390,43 @@ def validate_pool(payload, samples: int = DEFAULT_SAMPLES, refine: bool = True,
                 verdict, rho0, lo, hi = validate_ce(assn, rest, tau,
                                                     backend_delta, formula,
                                                     samples)
-                margin = _band_margin(rho0, tau, backend_delta)
-                rec.update(verdict=verdict, rho0=f"{rho0:.12g}",
-                           rho_min=f"{lo:.12g}", rho_max=f"{hi:.12g}",
-                           band_margin=f"{margin:.12g}")
-                if refine:
-                    fine, rho0f, _, _ = validate_ce(assn, rest, tau, backend_delta,
-                                                    formula, samples * REFINE_FACTOR)
-                    shift = abs(rho0f - rho0)
-                    rec["refined_verdict"] = fine
-                    rec["rho0_refined"] = f"{rho0f:.12g}"
-                    rec["rho0_shift"] = f"{shift:.12g}"
-                    rec["stable"] = "yes" if fine == verdict else "no"
-                    # The verdict is resolved when rho(0) is further from every
-                    # band edge than the two errors that could move it: the
-                    # backend's own slack, and how far the value moved when the
-                    # sampling was refined. A verdict can be `stable` and
-                    # unresolved at once -- staying inside one band says nothing
-                    # about how close to its edge it sits.
-                    rec["resolved"] = ("yes" if margin > max(backend_delta, shift)
-                                       else "no")
-                    if fine != verdict:
-                        rec["note"] = (f"sampling-sensitive: rho(0) "
-                                       f"{rho0f:.12g} at {REFINE_FACTOR}x")
-                    elif rec["resolved"] == "no":
-                        rec["note"] = (f"edge-resident: rho(0) is {margin:.3g} "
-                                       f"from a band edge, against a sampling "
-                                       f"shift of {shift:.3g} and a backend "
-                                       f"delta of {backend_delta:.3g}")
+                if not math.isfinite(rho0):
+                    # A non-finite rho(0) is not a band; `_classify` routes it
+                    # to `error`. Record the value and skip the refinement,
+                    # whose band comparisons a non-finite number cannot inform.
+                    rec.update(verdict="error", rho0=f"{rho0:.12g}",
+                               note=f"non-finite rho(0): {rho0:.12g}")
+                else:
+                    margin = _band_margin(rho0, tau, backend_delta)
+                    rec.update(verdict=verdict, rho0=f"{rho0:.12g}",
+                               rho_min=f"{lo:.12g}", rho_max=f"{hi:.12g}",
+                               band_margin=f"{margin:.12g}")
+                    if refine:
+                        fine, rho0f, _, _ = validate_ce(
+                            assn, rest, tau, backend_delta, formula,
+                            samples * REFINE_FACTOR)
+                        shift = abs(rho0f - rho0)
+                        rec["refined_verdict"] = fine
+                        rec["rho0_refined"] = f"{rho0f:.12g}"
+                        rec["rho0_shift"] = f"{shift:.12g}"
+                        rec["stable"] = "yes" if fine == verdict else "no"
+                        # The verdict is resolved when rho(0) is further from
+                        # every band edge than the two errors that could move
+                        # it: the backend's own slack, and how far the value
+                        # moved when the sampling was refined. A verdict can be
+                        # `stable` and unresolved at once -- staying inside one
+                        # band says nothing about how close to its edge it sits.
+                        rec["resolved"] = ("yes"
+                                           if margin > max(backend_delta, shift)
+                                           else "no")
+                        if fine != verdict:
+                            rec["note"] = (f"sampling-sensitive: rho(0) "
+                                           f"{rho0f:.12g} at {REFINE_FACTOR}x")
+                        elif rec["resolved"] == "no":
+                            rec["note"] = (f"edge-resident: rho(0) is {margin:.3g} "
+                                           f"from a band edge, against a sampling "
+                                           f"shift of {shift:.3g} and a backend "
+                                           f"delta of {backend_delta:.3g}")
         except Exception as exc:            # a reconstruction failure is a result
             rec["verdict"] = "error"
             rec["note"] = f"{type(exc).__name__}: {str(exc)[:120]}"
