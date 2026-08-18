@@ -16,6 +16,7 @@ from stlmc.generation.common import (
     DEFAULT_BACKEND_PRECISION,
     backend_precision,
     validate_gen,
+    z3_logic,
 )
 from stlmc.generation.oracle import DEFAULT_QUERY_TIMEOUT, query_timeout
 from stlmc.objects.configuration import Configuration, Section
@@ -128,3 +129,37 @@ class TestBackendPrecision:
         did not happen."""
         with pytest.raises(ValueError, match="precision"):
             backend_precision(config_with_dreal(precision=value), "dreal")
+
+
+def config_with_z3(**values):
+    section = Section()
+    section.name = "z3"
+    section.arguments = {k.replace("_", "-"): v for k, v in values.items()}
+    config = Configuration()
+    config.add_section(section)
+    return config
+
+
+class TestZ3Logic:
+    """`[z3] logic` selects the arithmetic the reach depends on. An unrecognised
+    value is a misspelling, and downgrading it to linear arithmetic hands a
+    nonlinear model the wrong solver, whose UNKNOWNs then read as solver
+    give-ups. So it is a configuration error naming the key and the value; a
+    missing section and a missing key keep the linear-arithmetic default."""
+
+    def test_recognised_values_resolve(self):
+        assert z3_logic(config_with_z3(logic="QF_LRA")) == "LRA"
+        assert z3_logic(config_with_z3(logic="QF_NRA")) == "NRA"
+
+    def test_an_unrecognised_value_names_the_key_and_value(self):
+        with pytest.raises(ValueError) as err:
+            z3_logic(config_with_z3(logic="QF_NRAA"))
+        assert "[z3] logic" in str(err.value)
+        assert "QF_NRAA" in str(err.value)
+
+    def test_a_missing_section_keeps_the_linear_arithmetic_default(self):
+        assert z3_logic(Configuration()) == "LRA"
+        assert z3_logic(None) == "LRA"
+
+    def test_a_missing_key_keeps_the_linear_arithmetic_default(self):
+        assert z3_logic(config_with_z3(random_seed="0")) == "LRA"
