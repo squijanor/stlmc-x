@@ -15,9 +15,9 @@ from conftest import FakeOracle, beyond, covers, probe_at
 
 from stlmc.constraints.constraints import BoolVal, Real, RealVal
 from stlmc.generation.box import (
-    _BOUNDARY,
     _DEEP,
     _DOMAIN,
+    _STRUCTURE_FRONTIER,
     RegionBoxDiscovery,
     _binding_bound,
     _block_box,
@@ -213,33 +213,33 @@ class TestMergeMarkers:
         witnesses = [assn(x_0_0=4.0)]
         labels = [_DEEP]
         merged = _merge_markers(
-            witnesses, labels, [assn(x_0_0=4.00001)], [_BOUNDARY], [x],
+            witnesses, labels, [assn(x_0_0=4.00001)], [_STRUCTURE_FRONTIER], [x],
             lambda v: Fraction(1, 100), None)
         assert merged == 1
         assert len(witnesses) == 1, "no duplicate entry for one initial condition"
-        assert labels == [_BOUNDARY], "the frontier annotation survives"
+        assert labels == [_STRUCTURE_FRONTIER], "the frontier annotation survives"
 
     def test_a_distinct_marker_is_appended(self, x):
         witnesses = [assn(x_0_0=4.0)]
         labels = [_DEEP]
         merged = _merge_markers(
-            witnesses, labels, [assn(x_0_0=5.0)], [_BOUNDARY], [x],
+            witnesses, labels, [assn(x_0_0=5.0)], [_STRUCTURE_FRONTIER], [x],
             lambda v: Fraction(1, 100), None)
         assert merged == 0
-        assert labels == [_DEEP, _BOUNDARY]
+        assert labels == [_DEEP, _STRUCTURE_FRONTIER]
 
     def test_an_existing_marker_label_is_not_downgraded(self, x):
         witnesses = [assn(x_0_0=4.0)]
         labels = [_DOMAIN]
-        _merge_markers(witnesses, labels, [assn(x_0_0=4.0)], [_BOUNDARY], [x],
+        _merge_markers(witnesses, labels, [assn(x_0_0=4.0)], [_STRUCTURE_FRONTIER], [x],
                        lambda v: Fraction(1, 100), None)
-        assert labels == [_DOMAIN], "domain outranks a coincident boundary"
+        assert labels == [_DOMAIN], "domain outranks a coincident structure-frontier"
 
     def test_coincidence_requires_every_axis(self, x, y):
         witnesses = [assn(x_0_0=4.0, y_0_0=1.0)]
         labels = [_DEEP]
         _merge_markers(witnesses, labels,
-                       [assn(x_0_0=4.0, y_0_0=9.0)], [_BOUNDARY], [x, y],
+                       [assn(x_0_0=4.0, y_0_0=9.0)], [_STRUCTURE_FRONTIER], [x, y],
                        lambda v: Fraction(1, 100), None)
         assert len(witnesses) == 2, "far apart on y is not a coincidence"
 
@@ -248,7 +248,7 @@ class TestMergeMarkers:
         labels = [_DEEP]
         tol = {x: Fraction(1, 10), y: Fraction(1, 1000)}
         _merge_markers(witnesses, labels,
-                       [assn(x_0_0=0.05, y_0_0=0.01)], [_BOUNDARY], [x, y],
+                       [assn(x_0_0=0.05, y_0_0=0.01)], [_STRUCTURE_FRONTIER], [x, y],
                        lambda v: tol[v], None)
         assert len(witnesses) == 2, "inside tol on x, outside on y -> distinct"
 
@@ -509,7 +509,7 @@ class TestGrowBoxUnderEitherOracle:
                             tolerance=Fraction(1, 1000))
         witnesses, labels, box = self._grow(oracle, _Theta(Fraction(1, 4)))
         assert witnesses and len(witnesses) == len(labels)
-        assert set(labels) <= {_DEEP, _BOUNDARY, _DOMAIN}
+        assert set(labels) <= {_DEEP, _STRUCTURE_FRONTIER, _DOMAIN}
         lo, hi = box[x]
         assert Fraction(4) <= lo <= Fraction(5) <= hi <= Fraction(6)
 
@@ -937,8 +937,8 @@ class TestBlocksBindThePivotNotGrowth:
     """Alg. 2: the pivot solves Enc conjoined with the negated blocks; every
     growth query runs on Enc[w] alone. Kept permanently, the blocks wall in
     the growth oracle and _search_face reads UNSAT at a block wall as a
-    bracketed frontier -- a `boundary` marker at an algorithmic wall (exact
-    path). Never asserted at all, the pivot the run uses can sit inside an
+    bracketed frontier -- a `structure-frontier` marker at an algorithmic wall
+    (exact path). Never asserted at all, the pivot the run uses can sit inside an
     already-blocked box and regrow the same region (delta path). Both
     backends must therefore frame the blocks around the pivot query alone.
     """
@@ -1168,7 +1168,8 @@ class TestOpenRangeEdges:
     The encoding bounds an open range strictly, so the probe at the wall is
     UNSAT for encoding reasons; with the inclusivity flags dropped, the
     bisection then 'bracketed' against the edge itself and the face was
-    labeled boundary -- the exact distinction the three labels exist to make.
+    labeled structure-frontier -- the exact distinction the three labels exist
+    to make.
     """
 
     @staticmethod
@@ -1195,7 +1196,7 @@ class TestOpenRangeEdges:
 
     def test_a_closed_edge_stays_a_frontier(self, x):
         labels = self._labels(True, x)
-        assert _DOMAIN not in labels and _BOUNDARY in labels
+        assert _DOMAIN not in labels and _STRUCTURE_FRONTIER in labels
 
 
 def test_ic_pivots_are_sorted_by_variable_id():
@@ -1249,14 +1250,15 @@ class TestPartialFaceWitnessSeparation:
             f"{[float(d) for d in deep]}")
 
     def test_an_exempt_frontier_marker_within_theta_still_survives(self, x):
-        # The -face brackets a real frontier near 4; its boundary marker is
-        # exempt from separation and must be kept even on a narrow box, since its
+        # The -face brackets a real frontier near 4; its structure-frontier
+        # marker is exempt from separation and must be kept even on a narrow box,
+        # since its
         # position is the frontier it reports.
         oracle = FakeOracle({x: (Fraction(4), Fraction(6))},
                             undecided=beyond(x, Fraction(57, 10)),
                             tolerance=Fraction(1, 1000))
         _, labels, _ = self._grow(oracle, _Theta(Fraction(1)))
-        assert _BOUNDARY in labels, "an exempt frontier marker must survive"
+        assert _STRUCTURE_FRONTIER in labels, "an exempt frontier marker must survive"
 
 
 # ================================================= harvest window delta floor

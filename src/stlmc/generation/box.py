@@ -17,7 +17,7 @@ converges, each face is examined once: if a falsifying initial condition is
 exhibited at the variable's declared range edge, the face's marker is ``domain``
 (the observable extent is the model domain, not a falsifying frontier); otherwise
 the search brackets the directional bound between a confirmed falsifying value
-and a confirmed non-falsifying one, giving a ``boundary`` marker there.
+and a confirmed non-falsifying one, giving a ``structure-frontier`` marker there.
 Bracketing locates where directional support ends, which coincides with the
 falsifying frontier only when the falsifying set is convex along the ray;
 convexity is an assumption, not a consequence of pinning the structure.
@@ -49,8 +49,8 @@ within theta of one an earlier box at the same depth contributed is dropped.
 Across depths no separation is imposed, because one initial condition falsifying
 at several depths is the depth axis rather than redundancy. Thinning
 (``[gen] thin-ic``) applies a coarser radius under the same scope, so a value at
-or below theta is a no-op. Boundary and domain markers are exempt from both and
-always kept, since their position is the information they carry. The thinning
+or below theta is a no-op. Structure-frontier and domain markers are exempt from
+both and always kept, since their position is the information they carry. The thinning
 default of 0 leaves it off.
 
 Initial-condition variables are the step-0 state copies ``<name>_0_0`` for each
@@ -146,7 +146,7 @@ _LATTICE_MAX = 200
 
 # Per-counterexample labels.
 _DEEP = "deep"
-_BOUNDARY = "boundary"
+_STRUCTURE_FRONTIER = "structure-frontier"
 _DOMAIN = "domain"
 
 
@@ -292,8 +292,9 @@ def _ic_ranges(
     IC variable ``<name>_0_0`` inherits the bounds of its state variable
     ``<name>``. The inclusivity flags ride along because the encoding bounds
     an open range strictly (``Lt``/``Gt``), and a face search that runs to an
-    open edge must be labeled ``domain``, not ``boundary``: dropping the flags
-    made the domain probe UNSAT for encoding reasons and mislabeled the face.
+    open edge must be labeled ``domain``, not ``structure-frontier``: dropping
+    the flags made the domain probe UNSAT for encoding reasons and mislabeled
+    the face.
     """
     by_id: dict[str, tuple[Fraction, Fraction, bool, bool]] = {}
     for state_var, bounds in range_dict.items():
@@ -866,7 +867,8 @@ class RegionBoxDiscovery(Algorithm):
         # Enc_n conjoined with the negated blocks, while every growth query
         # runs on Enc_n[w] alone). Asserted permanently they also wall in the
         # box growth: _search_face reads UNSAT at a block wall as a bracketed
-        # frontier and emits a `boundary` marker at a purely algorithmic wall.
+        # frontier and emits a `structure-frontier` marker at a purely
+        # algorithmic wall.
         # So they live in a frame that is popped once the pivot is extracted.
         # No frame when there is nothing to put in it: an empty push/pop still
         # perturbs the solver's model choice, which would change the pool of
@@ -1192,8 +1194,9 @@ class RegionBoxDiscovery(Algorithm):
                             else ""))
                     if status == "partial":
                         # The deepest confirmed point is still a counterexample;
-                        # it is labeled deep rather than boundary precisely
-                        # because it is not known to be on the frontier. As a
+                        # it is labeled deep rather than structure-frontier
+                        # precisely because it is not known to be on the
+                        # frontier. As a
                         # deep witness it is subject to theta separation, so it
                         # goes to deep_markers rather than the exempt marker list.
                         m = self._window_witness(oracle, var, others, bound, tol)
@@ -1205,7 +1208,8 @@ class RegionBoxDiscovery(Algorithm):
                 calls += 1
                 if m is not None:
                     markers.append(m)
-                    marker_labels.append(_DOMAIN if status == "domain" else _BOUNDARY)
+                    marker_labels.append(
+                        _DOMAIN if status == "domain" else _STRUCTURE_FRONTIER)
 
         collapsed = 0
         harvest_undecided = 0
@@ -1576,7 +1580,8 @@ class RegionBoxDiscovery(Algorithm):
         printer.print_verbose(
             f"[kappa_box] {total_boxes} box(es) over {len(target_depths)} "
             f"target depth(s), {len(pool)} witnesses: "
-            f"{labels.count(_DEEP)} deep, {labels.count(_BOUNDARY)} boundary, "
+            f"{labels.count(_DEEP)} deep, "
+            f"{labels.count(_STRUCTURE_FRONTIER)} structure-frontier, "
             f"{labels.count(_DOMAIN)} domain"
         )
 

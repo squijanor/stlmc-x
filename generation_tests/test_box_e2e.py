@@ -92,7 +92,7 @@ def test_labels_are_aligned_and_from_the_vocabulary(run):
         "eleventh")
     labels = payload[9]
     assert len(labels) == len(payload[0]), "one label per counterexample"
-    assert set(labels) <= {"deep", "boundary", "domain"}
+    assert set(labels) <= {"deep", "structure-frontier", "domain"}
 
 
 @pytest.fixture(scope="module")
@@ -146,14 +146,17 @@ def test_deep_witnesses_are_theta_separated(run):
 
 
 def test_frontier_markers_bound_the_pool(run):
-    """A boundary/domain marker sits at an extreme of the pool on some axis.
+    """A structure-frontier/domain marker sits at an extreme of the pool on some axis.
 
     Weak by construction, being what can be asserted without re-solving, but it
     catches a marker emitted from the interior of the box.
     """
     _, _, payload = run
     labels = payload[9]
-    markers = [i for i, label in enumerate(labels) if label in ("boundary", "domain")]
+    markers = [
+        i for i, label in enumerate(labels)
+        if label in ("structure-frontier", "domain")
+    ]
     assert markers, "a converged box must be labeled"
     for index in markers:
         at_extreme = False
