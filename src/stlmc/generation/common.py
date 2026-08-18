@@ -271,11 +271,26 @@ def validate_gen(config, keys=None) -> None:
 
 
 def z3_logic(config) -> str:
-    """The z3 logic name for ``[z3] logic``, defaulting to linear arithmetic."""
+    """The z3 logic name for ``[z3] logic``, defaulting to linear arithmetic.
+
+    An absent ``[z3]`` section or an absent ``logic`` key resolves to linear
+    arithmetic. A *present* ``logic`` whose value is not one of the recognised
+    names is a configuration error, not a silent downgrade: falling back to
+    linear arithmetic on an unrecognised value hands a nonlinear model a
+    linear-arithmetic solver, whose UNKNOWN answers then read as solver
+    give-ups rather than as the misspelling that produced them.
+    """
     if config is not None and config.is_section_in("z3"):
         z3_section = config.get_section("z3")
         if z3_section.is_argument_in("logic"):
-            return _Z3_LOGIC.get(z3_section.get_value("logic"), "LRA")
+            raw = z3_section.get_value("logic")
+            try:
+                return _Z3_LOGIC[raw]
+            except KeyError:
+                raise ValueError(
+                    f'[z3] logic = "{raw}": unrecognised value; expected one '
+                    f'of {", ".join(sorted(_Z3_LOGIC))}'
+                ) from None
     return "LRA"
 
 
