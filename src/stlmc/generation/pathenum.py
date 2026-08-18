@@ -142,6 +142,21 @@ def _off_lattice(word: list[tuple[Variable, Constant]]) -> list[str]:
     return bad
 
 
+def _missing_modes(word: list[tuple[Variable, Constant]], depth: int) -> list[str]:
+    """The mode variables ``currentMode_k`` for k in 0..depth that the model
+    omits, rendered for a log line; empty when the word has its full arity.
+
+    A depth-n word has one position per step, k = 0..n. A backend can return a
+    model that pins only some of them, and a block built from a short word
+    misses: a radius-0 clause ``OR_k (mode_k != w_k)`` over the positions
+    present excludes every word that agrees on them -- a disjunction coarser
+    than the single word the solver satisfied -- so it drops falsifying words
+    never exhibited, exactly as a radius-r ball does. Such a model cannot be
+    blocked or pooled."""
+    present = {int(MODE_RE.match(var.id).group(1)) for var, _ in word}
+    return [f"currentMode_{k}" for k in range(depth + 1) if k not in present]
+
+
 def block_radius(assn: dict[Variable, Constant], radius: int, uid: int) -> PathBlock:
     """Clause excluding every location word within Hamming distance ``radius`` of
     ``assn``'s word. ``uid`` makes the radius>=1 indicator variables unique.
@@ -340,18 +355,27 @@ class DiscretePathEnum(Algorithm):
                     break
 
                 assn = oracle.model()
-                # Guard the word before pooling or blocking. A model whose mode
-                # values do not spell an integral word cannot be excluded (the
-                # block would miss the word the solver satisfied and the next
-                # call may return the same model), and a mode word is exactly
-                # what this strategy pools -- so the model is dropped, the depth
-                # stops, and the run continues on the remaining depths.
+                # Guard the word before pooling or blocking. A model cannot be
+                # excluded when its mode values do not spell an integral word,
+                # or when it omits a step's mode variable so the word is short
+                # of its depth+1 arity: either way the block misses the word the
+                # solver satisfied -- a radius-0 clause over the positions
+                # present excludes every word that agrees on them, not the one
+                # word -- and the next call may return the same model. A mode
+                # word is also exactly what this strategy pools. So the model is
+                # dropped, the depth stops UNRESOLVED, and the run continues on
+                # the remaining depths.
                 word = _location_word(assn)
                 bad = _off_lattice(word)
-                if not word or bad:
+                missing = _missing_modes(word, depth)
+                if not word or bad or missing:
                     unresolved = True
-                    what = (", ".join(bad) if bad
-                            else "no currentMode_k variables in the model")
+                    if not word:
+                        what = "no currentMode_k variables in the model"
+                    elif bad:
+                        what = ", ".join(bad)
+                    else:
+                        what = "missing " + ", ".join(missing)
                     printer.print_normal(
                         f"[kappa_path] depth {depth}: cannot block this model "
                         f"({what}); the model is not pooled and the depth "
