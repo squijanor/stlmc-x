@@ -13,14 +13,25 @@ the directional supremum of the falsifying extent, not a certified coordinate,
 and the grown rectangle is a coordinate-wise search-and-harvest envelope, not a
 subset of the falsifying set. Witnesses are labeled by how their face resolved.
 The interior witnesses collected during growth are ``deep``. After a box's growth
-converges, each face is examined once: if a falsifying initial condition is
-exhibited at the variable's declared range edge, the face's marker is ``domain``
-(the observable extent is the model domain, not a falsifying frontier); otherwise
-the search brackets the directional bound between a confirmed falsifying value
-and a confirmed non-falsifying one, giving a ``structure-frontier`` marker there.
-Bracketing locates where directional support ends, which coincides with the
-falsifying frontier only when the falsifying set is convex along the ray;
+converges, each face is examined once against the effective initial-condition
+domain -- the region the initial condition confines the ICs to, which the
+declared variable range may be far wider than. If a falsifying initial condition
+reaches that IC-domain edge, the face's marker is ``ic-domain`` (the observable
+extent is the initial set's own edge, not a falsifying frontier); when that edge
+is only a per-axis projection of an initial set that is not an axis-aligned box,
+the marker is ``projected-domain`` instead. Otherwise the search brackets the
+directional bound strictly inside the IC domain, between a confirmed falsifying
+value and a confirmed non-falsifying one, giving a ``structure-frontier`` marker
+there. Bracketing locates where directional support ends, which coincides with
+the falsifying frontier only when the falsifying set is convex along the ray;
 convexity is an assumption, not a consequence of pinning the structure.
+
+The effective IC domain is resolved once per run (:func:`_ic_plan`). Explicit
+``[gen] target-axes`` (with optional ``[gen] target-bounds``) name the axes and
+their edges authoritatively; otherwise the initial condition is read as a
+conjunction of independent per-axis bounds where it is one, and projected onto
+each axis where it is not. An axis the initial condition pins to a point is not
+a diversity axis and is dropped rather than grown as a degenerate face.
 
 Both backends are supported. On an exact backend a face advances by theta-wide
 steps and the frontier is located by bisection. On a delta-decision backend the
@@ -49,14 +60,14 @@ within theta of one an earlier box at the same depth contributed is dropped.
 Across depths no separation is imposed, because one initial condition falsifying
 at several depths is the depth axis rather than redundancy. Thinning
 (``[gen] thin-ic``) applies a coarser radius under the same scope, so a value at
-or below theta is a no-op. Structure-frontier and domain markers are exempt from
-both and always kept, since their position is the information they carry. The thinning
-default of 0 leaves it off.
+or below theta is a no-op. Structure-frontier and domain markers (``ic-domain``,
+``projected-domain``) are exempt from both and always kept, since their position
+is the information they carry. The thinning default of 0 leaves it off.
 
-Initial-condition variables are the step-0 state copies ``<name>_0_0`` for each
-state variable named by ``range_dict``; mode variables are ``currentMode_k``.
-Box bounds are exact rationals so the degenerate pivot box is represented
-exactly.
+Initial-condition variables are the step-0 state copies ``<name>_0_0`` of the
+axes the IC plan targets (a subset of ``range_dict``); mode variables are
+``currentMode_k``. Box bounds are exact rationals so the degenerate pivot box is
+represented exactly.
 
 The pool is returned to the driver for serialization; the per-counterexample
 labels are exposed on the ``ce_labels`` attribute, aligned to the returned pool,
@@ -65,6 +76,7 @@ for the driver to append to the payload.
 
 from __future__ import annotations
 
+import re
 import time as _time
 from collections import Counter as _Counter
 from fractions import Fraction
@@ -82,6 +94,7 @@ from ..constraints.constraints import (
     Implies,
     Leq,
     Lt,
+    Neg,
     Neq,
     Not,
     Or,
@@ -147,7 +160,15 @@ _LATTICE_MAX = 200
 # Per-counterexample labels.
 _DEEP = "deep"
 _STRUCTURE_FRONTIER = "structure-frontier"
-_DOMAIN = "domain"
+# A face that reaches the effective initial-condition domain edge, rather than a
+# structure-relative frontier interior to it. ``ic-domain`` when that edge is
+# authoritative -- named by [gen] target-axes/target-bounds, or read off an
+# ``init`` that is a conjunction of independent per-axis bounds. ``projected-
+# domain`` when ``init`` is relational, non-convex or disjunctive: the per-axis
+# window is then the projection of the initial set onto the axis, not a certified
+# box face, so the label does not claim the observed extent is the whole domain.
+_IC_DOMAIN = "ic-domain"
+_PROJECTED_DOMAIN = "projected-domain"
 
 
 def _frac(value) -> Fraction:
@@ -259,17 +280,176 @@ def _skeleton_fix(assn: dict[Variable, Constant]) -> Formula:
     return And(terms) if terms else BoolVal("True")
 
 
-def _ic_pivots(assn: dict[Variable, Constant], range_dict) -> dict[Variable, Fraction]:
+def _ic_pivots(
+    assn: dict[Variable, Constant], range_dict, keep_ids=None
+) -> dict[Variable, Fraction]:
     """Initial-condition variables (<name>_0_0) and their pivot values.
 
     Sorted by variable id. The assignment dict arrives in the solver's model
     order (z3's ``decls()`` order, dReal's print order), which no seed pins --
     and :meth:`RegionBoxDiscovery._grow_box` grows greedily in one pass, so
     the converged geometry depends on this iteration order. Sorting makes the
-    box a function of the configuration and the solver build alone."""
+    box a function of the configuration and the solver build alone.
+
+    ``keep_ids`` restricts the axes to a chosen subset (the IC plan's target
+    axes); ``None`` keeps every step-0 copy of a ``range_dict`` variable. A
+    variable the initial condition pins to a point, or one the configuration
+    does not target, is dropped here rather than grown as a degenerate axis."""
     ic_ids = {f"{k.id}_0_0" for k in range_dict}
+    if keep_ids is not None:
+        ic_ids &= set(keep_ids)
     found = {v: _frac(c.value) for v, c in assn.items() if v.id in ic_ids}
     return {v: found[v] for v in sorted(found, key=lambda var: var.id)}
+
+
+def _const_value(node):
+    """The rational value of a constant expression, or ``None``.
+
+    Handles the shapes the model parser produces for an initial-condition bound:
+    a ``RealVal``/``IntVal`` leaf and a negated one (``- 0.2`` parses to
+    ``Neg(RealVal("0.2"))``). Anything else -- a variable, an arithmetic term,
+    a Boolean constant -- is not a numeric constant and returns ``None``."""
+    if isinstance(node, Neg):
+        inner = _const_value(node.child)
+        return None if inner is None else -inner
+    if isinstance(node, Constant):
+        try:
+            return Fraction(str(node.value))
+        except (ValueError, ZeroDivisionError):
+            return None
+    return None
+
+
+def _axis_bound(node, state_ids):
+    """One ``init`` conjunct read as a per-axis bound.
+
+    Returns ``(state_id, lo, hi)`` for a comparison between a declared state
+    variable and a constant, with the unconstrained side ``None`` (an equality
+    fixes both), or ``None`` when the conjunct is not a per-axis bound: a
+    Boolean literal or its negation, a disjunction, a relational term coupling
+    two variables, or a bound on a variable that is not a declared IC axis (a
+    mode index)."""
+    if not isinstance(node, (Geq, Gt, Leq, Lt, Eq)):
+        return None
+    left, right = node.left, node.right
+    left_c, right_c = _const_value(left), _const_value(right)
+    if isinstance(left, Variable) and left.id in state_ids and right_c is not None:
+        state_id, value, var_on_left = left.id, right_c, True
+    elif isinstance(right, Variable) and right.id in state_ids and left_c is not None:
+        state_id, value, var_on_left = right.id, left_c, False
+    else:
+        return None
+    if isinstance(node, Eq):
+        return (state_id, value, value)
+    lower = (isinstance(node, (Geq, Gt)) if var_on_left
+             else isinstance(node, (Leq, Lt)))
+    return (state_id, value, None) if lower else (state_id, None, value)
+
+
+def _init_projection(init, range_dict):
+    """Read ``init`` as per-axis interval bounds on the IC axes.
+
+    Returns ``(per_axis, is_box)``. ``per_axis`` maps ``<name>_0_0`` to
+    ``[lo, hi]`` (a side ``init`` does not bound stays ``None``; an equality
+    makes ``lo == hi``). ``is_box`` is True only when *every* conjunct of the
+    flattened top-level conjunction is a per-axis bound on a declared variable:
+    then the projection is the initial set exactly, an axis-aligned box. One
+    conjunct of any other shape -- a Boolean, a negation, a disjunction, a
+    relational term, a bound on a non-declared variable -- clears it, and the
+    per-axis windows are a projection of a set that is not a box."""
+    state_ids = {sv.id for sv in range_dict}
+    per_axis: dict[str, list] = {}
+    is_box = True
+
+    def fold(node):
+        nonlocal is_box
+        if isinstance(node, And):
+            for child in node.children:
+                fold(child)
+            return
+        info = _axis_bound(node, state_ids)
+        if info is None:
+            is_box = False
+            return
+        state_id, lo, hi = info
+        cur = per_axis.setdefault(f"{state_id}_0_0", [None, None])
+        if lo is not None:
+            cur[0] = lo if cur[0] is None else max(cur[0], lo)
+        if hi is not None:
+            cur[1] = hi if cur[1] is None else min(cur[1], hi)
+
+    if init is not None:
+        fold(init)
+    return per_axis, is_box
+
+
+def _parse_target_bounds(raw):
+    """``[gen] target-bounds`` -> ``{<name>_0_0: (lo, hi)}``.
+
+    Slash-separated ``name/lo/hi`` triples: the config grammar lexes an
+    identifier and a signed decimal to one VALUE token only without other
+    punctuation, so a colon or comma inside the value cannot be used. Empty
+    -> ``{}``. Malformed input is rejected up front by ``validate_gen``."""
+    if not raw:
+        return {}
+    toks = [t.strip() for t in re.split(r"[,/]", raw) if t.strip() != ""]
+    out = {}
+    for i in range(0, len(toks) - 2, 3):
+        out[f"{toks[i]}_0_0"] = (Fraction(toks[i + 1]), Fraction(toks[i + 2]))
+    return out
+
+
+def _edge_of(ic_id, projection, declared):
+    """Effective ``(lo, hi)`` for one axis: the ``init`` projection where it
+    bounds the axis, the declared range where it does not. Both finite."""
+    lo_d, hi_d = declared[ic_id]
+    lo, hi = projection.get(ic_id, (None, None))
+    return (lo if lo is not None else lo_d, hi if hi is not None else hi_d)
+
+
+def _ic_plan(config, model):
+    """Resolve the IC axes, their effective domain edges, and the label a face
+    reaching an edge earns.
+
+    Precedence:
+      1. ``[gen] target-axes`` (authoritative): the named axes exactly, dropping
+         every declared variable not listed -- a coordinate the initial
+         condition pins, say. ``[gen] target-bounds`` overrides an axis's edges;
+         an axis it omits takes its ``init`` projection, then its declared range.
+         Reaching such an edge is ``ic-domain``: the configuration asserts the
+         box.
+      2. Otherwise the ``init`` box-shape detector: every declared axis the
+         initial condition does not pin to a point, edged by ``init`` where it
+         bounds the axis and by the declared range where it does not. The label
+         is ``ic-domain`` when ``init`` is a certified per-axis box and
+         ``projected-domain`` when it is not.
+
+    Returns ``(axis_ids, edges, label)``: ``axis_ids`` an ordered list of
+    ``<name>_0_0``, ``edges`` mapping each to a finite ``(lo, hi)``, ``label``
+    one of :data:`_IC_DOMAIN` / :data:`_PROJECTED_DOMAIN`."""
+    range_dict = model.range_dict
+    declared = {f"{sv.id}_0_0": (_frac(b[1]), _frac(b[2]))
+                for sv, b in range_dict.items()}
+    projection, is_box = _init_projection(getattr(model, "init", None), range_dict)
+
+    cfg_axes = gen_str(config, "target-axes")
+    cfg_bounds = _parse_target_bounds(gen_str(config, "target-bounds"))
+    if cfg_axes:
+        names = [t.strip() for t in re.split(r"[,/]", cfg_axes) if t.strip()]
+        axis_ids = sorted({f"{n}_0_0" for n in names} & set(declared))
+        edges = {i: cfg_bounds.get(i) or _edge_of(i, projection, declared)
+                 for i in axis_ids}
+        return axis_ids, edges, _IC_DOMAIN
+
+    axis_ids, edges = [], {}
+    for ic_id in declared:
+        lo, hi = projection.get(ic_id, (None, None))
+        if lo is not None and hi is not None and lo == hi:
+            continue                       # init pins this axis: not a diversity axis
+        axis_ids.append(ic_id)
+        edges[ic_id] = _edge_of(ic_id, projection, declared)
+    label = _IC_DOMAIN if is_box else _PROJECTED_DOMAIN
+    return sorted(axis_ids), edges, label
 
 
 def _box_of(box: dict[Variable, list[Fraction]], skip: Variable, rv=_rv) -> Formula:
@@ -281,26 +461,6 @@ def _box_of(box: dict[Variable, list[Fraction]], skip: Variable, rv=_rv) -> Form
         terms.append(Geq(var, rv(lo)))
         terms.append(Leq(var, rv(hi)))
     return And(terms) if terms else BoolVal("True")
-
-
-def _ic_ranges(
-    box: dict[Variable, list[Fraction]], range_dict
-) -> dict[Variable, tuple[Fraction, Fraction, bool, bool]]:
-    """Declared (lo, hi, lo_incl, hi_incl) for each IC variable in ``box``.
-
-    ``range_dict`` maps a state Variable to ``(lo_incl, lo, hi, hi_incl)``; the
-    IC variable ``<name>_0_0`` inherits the bounds of its state variable
-    ``<name>``. The inclusivity flags ride along because the encoding bounds
-    an open range strictly (``Lt``/``Gt``), and a face search that runs to an
-    open edge must be labeled ``domain``, not ``structure-frontier``: dropping
-    the flags made the domain probe UNSAT for encoding reasons and mislabeled
-    the face.
-    """
-    by_id: dict[str, tuple[Fraction, Fraction, bool, bool]] = {}
-    for state_var, bounds in range_dict.items():
-        by_id[f"{state_var.id}_0_0"] = (_frac(bounds[1]), _frac(bounds[2]),
-                                        bool(bounds[0]), bool(bounds[3]))
-    return {var: by_id[var.id] for var in box if var.id in by_id}
 
 
 def _block_box(bounds: dict[Variable, tuple[Fraction, Fraction]], rv=_rv) -> Formula:
@@ -357,23 +517,24 @@ class _Theta:
     extended.
 
     A single absolute theta fixes that granularity in model units, so it is a
-    different fraction of each axis whose declared range differs.
-    ``[gen] epsilon-relative`` instead sets theta as a fraction of each declared
-    range, making the granularity uniform relative to the space each variable
-    ranges over. ``[gen] epsilon`` remains the absolute default and the fallback
-    for an axis whose range is undeclared or degenerate.
+    different fraction of each axis whose initial-condition domain differs.
+    ``[gen] epsilon-relative`` instead sets theta as a fraction of each axis's
+    effective IC-domain width, making the granularity uniform relative to the
+    space each variable actually ranges over initially -- not the declared
+    range, which the initial condition may be far narrower than. ``[gen]
+    epsilon`` remains the absolute default and the fallback for an axis whose
+    IC-domain width is unknown or degenerate.
     """
 
     def __init__(self, absolute: Fraction, relative: Fraction | None = None,
-                 range_dict=None) -> None:
+                 widths=None) -> None:
         self.absolute = absolute
         self.relative = relative
         self._by_id: dict[str, Fraction] = {}
-        if relative is not None and range_dict is not None:
-            for state_var, bounds in range_dict.items():
-                width = _frac(bounds[2]) - _frac(bounds[1])
+        if relative is not None and widths:
+            for ic_id, width in widths.items():
                 if width > 0:
-                    self._by_id[f"{state_var.id}_0_0"] = relative * width
+                    self._by_id[ic_id] = relative * width
 
     def of(self, var) -> Fraction:
         """theta for one IC variable."""
@@ -385,7 +546,7 @@ class _Theta:
         per_axis = ", ".join(
             f"{vid}={float(value)}"
             for vid, value in sorted(self._by_id.items()))
-        return (f"theta={float(self.relative)} x declared range -> {per_axis}"
+        return (f"theta={float(self.relative)} x IC-domain width -> {per_axis}"
                 f" (fallback {float(self.absolute)})")
 
 
@@ -526,6 +687,24 @@ def _coincides_with(marker, pool, ic_vars, tol) -> int | None:
     return None
 
 
+# Label priority for a point on more than one face. A ``structure-frontier``
+# reports a falsifying frontier interior to the IC domain -- the substantive
+# claim -- so it outranks a domain-edge touch, which only records that the box
+# met the initial set's own boundary there; either outranks a plain interior
+# ``deep`` witness. A single initial condition can sit on faces of different
+# kinds (an adverse corner is on the domain edge of the pinned axes and on an
+# interior frontier of another), and the pool keeps the most informative of
+# them so the interior demonstration is not masked by a coincident edge.
+_LABEL_RANK = {_DEEP: 0, _IC_DOMAIN: 1, _PROJECTED_DOMAIN: 1,
+               _STRUCTURE_FRONTIER: 2}
+
+
+def _prefer_label(current: str, candidate: str) -> str:
+    """The more informative of two labels for one initial condition."""
+    return candidate if _LABEL_RANK.get(candidate, 0) > _LABEL_RANK.get(
+        current, 0) else current
+
+
 def _merge_markers(witnesses, labels, markers, marker_labels, ic_vars, tol,
                    printer) -> int:
     """Append face markers, merging any that land on a witness already collected.
@@ -534,10 +713,11 @@ def _merge_markers(witnesses, labels, markers, marker_labels, ic_vars, tol,
     on a frontier: the face search confirms a bound the pivot already occupies.
     Appending it would put two entries in the pool for one initial condition.
 
-    The merge keeps the more informative label: the two are the same point to
-    within ``tol``, so the existing witness is relabeled in place and the
-    frontier annotation is preserved. ``tol`` is below the granularity theta
-    declares, so only points the search cannot tell apart are merged.
+    The merge keeps the more informative label (:data:`_LABEL_RANK`): the two
+    are the same point to within ``tol``, so the existing witness is relabeled
+    in place when the marker carries a stronger claim, and the frontier
+    annotation is preserved. ``tol`` is below the granularity theta declares, so
+    only points the search cannot tell apart are merged.
 
     ``tol`` is a callable ``var -> Fraction``, since the tolerance follows theta
     and theta may differ per axis.
@@ -556,8 +736,7 @@ def _merge_markers(witnesses, labels, markers, marker_labels, ic_vars, tol,
             labels.append(marker_label)
         else:
             merged += 1
-            if labels[hit] == _DEEP:
-                labels[hit] = marker_label
+            labels[hit] = _prefer_label(labels[hit], marker_label)
     if merged and printer is not None:
         printer.print_verbose(
             "[kappa_box] {} marker(s) coincided with an existing witness "
@@ -1116,15 +1295,24 @@ class RegionBoxDiscovery(Algorithm):
         return out, requested, undecided
 
     def _grow_box(self, oracle, pivot, encoding, theta: _Theta, iters, depth,
-                  budget, printer):
+                  budget, printer, axis_ids=None, ic_edges=None,
+                  domain_label=_IC_DOMAIN):
         """Grow, label and sample one box around ``pivot``.
 
-        One procedure for both kinds of oracle. Per face, a domain probe and a
-        logarithmic search for the bound; then a lattice of witnesses over the
-        converged box. What the oracle changes is the precision: the search runs
-        to ``theta / 2**iters`` on an exact oracle and to ``theta / 8`` on a
-        partial one, in both cases floored by the oracle's own tolerance, since
-        no query distinguishes points closer than that.
+        One procedure for both kinds of oracle. Per face, a search toward the
+        IC-domain edge for the directional bound; then a lattice of witnesses
+        over the converged box. What the oracle changes is the precision: the
+        search runs to ``theta / 2**iters`` on an exact oracle and to
+        ``theta / 8`` on a partial one, in both cases floored by the oracle's
+        own tolerance, since no query distinguishes points closer than that.
+
+        ``axis_ids`` and ``ic_edges`` are the IC plan (:func:`_ic_plan`): which
+        step-0 variables are grown, and the effective ``(lo, hi)`` domain edge
+        each face searches toward. Absent, every ``range_dict`` axis is grown to
+        its declared range -- the standalone default. ``domain_label`` is the
+        marker a face reaching an IC-domain edge earns (``ic-domain`` or
+        ``projected-domain``); a bracketed crossing interior to the edge is
+        always ``structure-frontier``.
 
         Growth is greedy and single-pass: each axis is searched against the
         already-grown extents of the axes before it and the pivot values of
@@ -1132,11 +1320,15 @@ class RegionBoxDiscovery(Algorithm):
         converged box is therefore a function of that order -- a second pass
         could grow it further -- and is a bounding box of confirmed slices,
         not a maximal box of the falsifying set."""
-        ic = _ic_pivots(pivot, encoding.range_dict)
+        if ic_edges is None:
+            ic_edges = {f"{sv.id}_0_0": (_frac(b[1]), _frac(b[2]))
+                        for sv, b in encoding.range_dict.items()}
+        if axis_ids is None:
+            axis_ids = sorted(ic_edges)
+        ic = _ic_pivots(pivot, encoding.range_dict, keep_ids=axis_ids)
         if not ic:
             raise RuntimeError("no initial-condition variables (<name>_0_0) found")
         box = {v: [p, p] for v, p in ic.items()}
-        ranges = _ic_ranges(box, encoding.range_dict)
 
         def tol_of(v):
             return _face_tol(oracle, theta, v, iters)
@@ -1151,25 +1343,34 @@ class RegionBoxDiscovery(Algorithm):
         for var in box:
             tol = tol_of(var)
             others = _box_of(box, var, oracle.rv)
-            lo_dom, hi_dom, lo_incl, hi_incl = ranges.get(
-                var, (None, None, True, True))
+            lo_dom, hi_dom = ic_edges.get(var.id, (None, None))
             for direction in (+1, -1):
                 wall = hi_dom if direction > 0 else lo_dom
                 if wall is None:
                     continue
                 start = box[var][1] if direction > 0 else box[var][0]
+                # The pivot already sits at (or past) the IC-domain edge on this
+                # face: there is no interior to search, and the edge itself is
+                # where a witness sits. Emit the domain marker at the pivot.
+                if (direction > 0 and wall <= start) or (
+                        direction < 0 and wall >= start):
+                    m = self._window_witness(oracle, var, others, start, tol)
+                    calls += 1
+                    if m is not None:
+                        markers.append(m)
+                        marker_labels.append(domain_label)
+                    continue
                 bound, status, c = self._search_face(
                     oracle, var, others, start, wall, tol)
                 calls += c
-                wall_open = not (hi_incl if direction > 0 else lo_incl)
-                if (status == "frontier" and wall_open
-                        and abs(wall - bound) <= 2 * tol):
-                    # An open range edge: the encoding bounds the variable
-                    # strictly, so the probe AT the wall is UNSAT for encoding
-                    # reasons and the bisection "brackets" against the edge
-                    # itself. The falsifying set runs to the declared range --
-                    # a domain face, not an interior frontier.
-                    status = "domain"
+                # The wall is the IC-domain edge, so a bound that reaches it --
+                # a satisfying probe AT the edge, or a bracket that lands within
+                # tolerance of it, whether the edge is open or closed in the
+                # encoding -- is a domain face. A bracket that stops strictly
+                # inside is a structure-relative crossing.
+                at_edge = (status == "domain"
+                           or (status == "frontier"
+                               and abs(wall - bound) <= 2 * tol))
                 if direction > 0:
                     box[var][1] = bound
                 else:
@@ -1209,7 +1410,7 @@ class RegionBoxDiscovery(Algorithm):
                 if m is not None:
                     markers.append(m)
                     marker_labels.append(
-                        _DOMAIN if status == "domain" else _STRUCTURE_FRONTIER)
+                        domain_label if at_edge else _STRUCTURE_FRONTIER)
 
         collapsed = 0
         harvest_undecided = 0
@@ -1315,10 +1516,23 @@ class RegionBoxDiscovery(Algorithm):
 
         logic = z3_logic(config)
         seed = resolve_seed(config, printer)
-        # theta: absolute by default, per-axis when [gen] epsilon-relative is set.
+        # Which step-0 variables are grown, the effective IC-domain edge each
+        # face searches toward, and whether reaching an edge is `ic-domain` or a
+        # `projected-domain` per-axis projection. Resolved once, from the model's
+        # initial condition and [gen] target-axes/target-bounds.
+        axis_ids, ic_edges, domain_label = _ic_plan(config, model)
+        ic_widths = {i: hi - lo for i, (lo, hi) in ic_edges.items() if hi > lo}
+        printer.print_normal(
+            "[kappa_box] IC domain ({}): {}".format(
+                domain_label,
+                ", ".join(f"{i}=[{float(lo)},{float(hi)}]"
+                          for i, (lo, hi) in sorted(ic_edges.items()))
+                or "declared ranges"))
+        # theta: absolute by default, per-axis (fraction of the IC-domain width)
+        # when [gen] epsilon-relative is set.
         theta = _Theta(gen_frac(config, "epsilon", "0.01"),
                        gen_frac(config, "epsilon-relative", "0") or None,
-                       model.range_dict)
+                       ic_widths)
         bisect_iters = gen_int(config, "bisect-iters")
         # 0 is a meaningful setting (face precision theta itself), so no `or`.
         bisect_iters = _BISECT_ITERS if bisect_iters is None else bisect_iters
@@ -1494,7 +1708,7 @@ class RegionBoxDiscovery(Algorithm):
                 witnesses, box_labels, box = self._grow_box(
                     oracle, pivot, encoding, theta, bisect_iters, depth,
                     _DEFAULT_K_WITNESS if k_witness is None else k_witness,
-                    printer
+                    printer, axis_ids, ic_edges, domain_label
                 )
                 boxes_here += 1
                 total_boxes += 1
@@ -1536,8 +1750,7 @@ class RegionBoxDiscovery(Algorithm):
                         if hit is not None:
                             merged_across += 1
                             at = depth_offset + hit
-                            if labels[at] == _DEEP:
-                                labels[at] = label
+                            labels[at] = _prefer_label(labels[at], label)
                             continue
                     depth_pool.append(witness)
                     pool.append(witness)
@@ -1582,7 +1795,8 @@ class RegionBoxDiscovery(Algorithm):
             f"target depth(s), {len(pool)} witnesses: "
             f"{labels.count(_DEEP)} deep, "
             f"{labels.count(_STRUCTURE_FRONTIER)} structure-frontier, "
-            f"{labels.count(_DOMAIN)} domain"
+            f"{labels.count(_IC_DOMAIN)} ic-domain, "
+            f"{labels.count(_PROJECTED_DOMAIN)} projected-domain"
         )
 
         result, note = _verdict(pool, getattr(self, "_any_unresolved", False),
