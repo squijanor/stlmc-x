@@ -219,6 +219,48 @@ def _check_positive_seconds(key: str, raw: str) -> None:
             'spelling')
 
 
+_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _check_target_axes(key: str, raw: str) -> None:
+    toks = [t.strip() for t in re.split(r"[,/]", str(raw).strip().strip('"'))
+            if t.strip()]
+    if not toks:
+        raise ValueError(
+            f'[gen] {key} = "{raw}": at least one axis name is required; the '
+            'list is slash-separated, e.g. "y/psi/r/Vc"')
+    for tok in toks:
+        if not _NAME_RE.match(tok):
+            raise ValueError(
+                f'[gen] {key} = "{raw}": "{tok}" is not a state-variable name')
+
+
+def _check_target_bounds(key: str, raw: str) -> None:
+    toks = [t.strip() for t in re.split(r"[,/]", str(raw).strip().strip('"'))
+            if t.strip()]
+    if not toks:
+        return
+    if len(toks) % 3 != 0:
+        raise ValueError(
+            f'[gen] {key} = "{raw}": expected name/lo/hi triples (a multiple of '
+            'three slash-separated tokens), e.g. "y/0.5/2.5/psi/0.1/0.7"')
+    for i in range(0, len(toks), 3):
+        name, lo_raw, hi_raw = toks[i], toks[i + 1], toks[i + 2]
+        if not _NAME_RE.match(name):
+            raise ValueError(
+                f'[gen] {key} = "{raw}": "{name}" is not a state-variable name')
+        try:
+            lo, hi = Fraction(lo_raw), Fraction(hi_raw)
+        except (ValueError, ZeroDivisionError):
+            raise ValueError(
+                f'[gen] {key} = "{raw}": {name} edges "{lo_raw}/{hi_raw}" must '
+                'both be numbers') from None
+        if lo > hi:
+            raise ValueError(
+                f'[gen] {key} = "{raw}": {name} lower edge {lo_raw} exceeds '
+                f'upper edge {hi_raw}')
+
+
 # Key -> check. Entries cover the keys kappa_path reads and the keys the
 # backends share; the sibling strategy registers its own keys here as they
 # gain validation. A key with no entry passes unchecked.
@@ -245,6 +287,11 @@ _GEN_KEY_CHECKS = {
     "log-every": _check_int_at_least(1),
     "pivot-budget": _check_positive_seconds,
     "pivot-timeout": _check_positive_seconds,
+    # The authoritative IC-domain axes and edges: a slash-separated list of
+    # axis names, and name/lo/hi triples. A malformed value here would either
+    # drop an intended axis silently or fail deep inside the plan.
+    "target-axes": _check_target_axes,
+    "target-bounds": _check_target_bounds,
 }
 
 
