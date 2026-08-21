@@ -425,7 +425,7 @@ def warn_unpinned_hashseed(printer) -> None:
         )
 
 
-def scoped_verdict(pool, any_unresolved, visited, max_depth, *,
+def scoped_verdict(pool, any_unresolved, decided_depths, max_depth, *,
                    tag: str, nothing_found: str, unresolved_source: str):
     """The run's verdict, and the line explaining it (or None).
 
@@ -449,9 +449,9 @@ def scoped_verdict(pool, any_unresolved, visited, max_depth, *,
     if any_unresolved:
         return "Unknown", (f"[{tag}] {nothing_found}, but {unresolved_source} "
                            "was unresolved: reporting Unknown, not True")
-    skipped = set(range(0, max_depth + 1)) - set(visited)
+    skipped = set(range(0, max_depth + 1)) - set(decided_depths)
     if skipped:
-        seen = "/".join(str(d) for d in sorted(set(visited))) or "none"
+        seen = "/".join(str(d) for d in sorted(set(decided_depths))) or "none"
         missed = "/".join(str(d) for d in sorted(skipped))
         return "Unknown", (
             f"[{tag}] {nothing_found}, decided depth(s) {seen}, but depth(s) "
