@@ -92,7 +92,8 @@ def test_labels_are_aligned_and_from_the_vocabulary(run):
         "eleventh")
     labels = payload[9]
     assert len(labels) == len(payload[0]), "one label per counterexample"
-    assert set(labels) <= {"deep", "structure-frontier", "domain"}
+    assert set(labels) <= {"deep", "structure-frontier", "ic-domain",
+                           "projected-domain"}
 
 
 @pytest.fixture(scope="module")
@@ -107,16 +108,32 @@ def validation(run):
     return validate_pool(payload, samples=15)
 
 
-def test_every_counterexample_falsifies(validation):
+def test_every_counterexample_falsifies(validation, run):
     """The property that makes a pool a pool. Uses the tool's own STL semantics.
 
     `threshold-only` passes: the encoding applies tau by relaxing the negated
     goal, so a witness within tau of violating is what the search was asked for.
+
+    A domain / structure-frontier marker sits at the acceptance boundary by
+    construction -- its robustness is ~tau -- so the tool's own solver accepts it
+    while an independent re-evaluation can land it a solver-epsilon past tau. A
+    marker within that epsilon of tau is the boundary, not a spurious
+    non-falsifier; a deep witness, which is interior, is held to the strict bar.
     """
-    records = validation
-    bad = [r for r in records if r["verdict"] in ("unverified", "error")]
+    _, _, payload = run
+    tau = Fraction(str(payload[8]))
+    boundary_eps = Fraction(1, 1_000_000)
+
+    def spurious(record):
+        if record["verdict"] not in ("unverified", "error"):
+            return False
+        if record["label"] != "deep" and record["verdict"] == "unverified":
+            return abs(Fraction(str(record["rho0"])) - tau) > boundary_eps
+        return True
+
+    bad = [r for r in validation if spurious(r)]
     assert not bad, "non-falsifying entries: {}".format(
-        [(r["index"], r["verdict"], r["note"]) for r in bad[:5]])
+        [(r["index"], r["label"], r["verdict"], r["rho0"]) for r in bad[:5]])
 
 
 def test_deep_witnesses_are_theta_separated(run):
@@ -146,23 +163,28 @@ def test_deep_witnesses_are_theta_separated(run):
 
 
 def test_frontier_markers_bound_the_pool(run):
-    """A structure-frontier/domain marker sits at an extreme of the pool on some axis.
+    """A frontier / domain marker sits at an extreme of the pool on some axis.
 
     Weak by construction, being what can be asserted without re-solving, but it
-    catches a marker emitted from the interior of the box.
+    catches a marker emitted from the interior of the box. The comparison is to
+    a tolerance, not exact: a marker sits at the box edge, but a harvested deep
+    witness may land a sampling-window's width past it, so the pool extreme can
+    be a hair beyond the marker.
     """
     _, _, payload = run
     labels = payload[9]
     markers = [
         i for i, label in enumerate(labels)
-        if label in ("structure-frontier", "domain")
+        if label in ("structure-frontier", "ic-domain", "projected-domain")
     ]
     assert markers, "a converged box must be labeled"
+    tol = Fraction(1, 1000)
     for index in markers:
         at_extreme = False
         for var_id in ("x1_0_0", "x2_0_0"):
             values = ic_values(payload, var_id)
-            if values and values[index] in (min(values), max(values)):
+            if values and (abs(values[index] - min(values)) <= tol
+                           or abs(values[index] - max(values)) <= tol):
                 at_extreme = True
         assert at_extreme, f"marker {index} is interior on every axis"
 

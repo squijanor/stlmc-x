@@ -13,16 +13,36 @@ from time import sleep as _sleep
 
 from conftest import FakeOracle, beyond, covers, probe_at
 
-from stlmc.constraints.constraints import BoolVal, Real, RealVal
+from stlmc.constraints.constraints import (
+    And,
+    Bool,
+    BoolVal,
+    Eq,
+    Geq,
+    Int,
+    IntVal,
+    Leq,
+    Neg,
+    Not,
+    Real,
+    RealVal,
+)
 from stlmc.generation.box import (
     _DEEP,
-    _DOMAIN,
+    _IC_DOMAIN,
+    _PROJECTED_DOMAIN,
     _STRUCTURE_FRONTIER,
     RegionBoxDiscovery,
+    _axis_bound,
     _binding_bound,
     _block_box,
     _box_budget,
+    _const_value,
+    _ic_plan,
+    _init_projection,
     _merge_markers,
+    _parse_target_bounds,
+    _prefer_label,
     _Theta,
     _too_close,
     _value_of,
@@ -162,26 +182,25 @@ class TestTheta:
         theta = _Theta(Fraction(1, 20))
         assert theta.of(x) == theta.of(y) == Fraction(1, 20)
 
-    def test_relative_scales_by_declared_range(self, x, y):
-        # range_dict: state variable -> (lo_incl, lo, hi, hi_incl)
-        range_dict = {Real("x"): (True, "0", "10", True),
-                      Real("y"): (True, "-20", "20", True)}
-        theta = _Theta(Fraction(1, 100), Fraction(1, 200), range_dict)
+    def test_relative_scales_by_ic_domain_width(self, x, y):
+        # widths are the effective IC-domain widths, keyed by the step-0 id.
+        widths = {"x_0_0": Fraction(10), "y_0_0": Fraction(40)}
+        theta = _Theta(Fraction(1, 100), Fraction(1, 200), widths)
         assert theta.of(x) == Fraction(10, 200)     # 0.05
         assert theta.of(y) == Fraction(40, 200)     # 0.20
 
-    def test_relative_falls_back_where_no_range_is_declared(self, x):
+    def test_relative_falls_back_where_no_width_is_known(self, x):
         theta = _Theta(Fraction(1, 100), Fraction(1, 200), {})
         assert theta.of(x) == Fraction(1, 100)
 
-    def test_degenerate_range_falls_back(self, x):
-        range_dict = {Real("x"): (True, "3", "3", True)}
-        theta = _Theta(Fraction(1, 100), Fraction(1, 200), range_dict)
+    def test_degenerate_width_falls_back(self, x):
+        widths = {"x_0_0": Fraction(0)}
+        theta = _Theta(Fraction(1, 100), Fraction(1, 200), widths)
         assert theta.of(x) == Fraction(1, 100)
 
     def test_relative_equals_absolute_when_the_numbers_coincide(self, x):
-        range_dict = {Real("x"): (True, "0", "10", True)}
-        assert (_Theta(Fraction(1, 100), Fraction(1, 200), range_dict).of(x)
+        widths = {"x_0_0": Fraction(10)}
+        assert (_Theta(Fraction(1, 100), Fraction(1, 200), widths).of(x)
                 == _Theta(Fraction(1, 20)).of(x))
 
 
@@ -228,12 +247,22 @@ class TestMergeMarkers:
         assert merged == 0
         assert labels == [_DEEP, _STRUCTURE_FRONTIER]
 
-    def test_an_existing_marker_label_is_not_downgraded(self, x):
+    def test_an_interior_frontier_outranks_a_coincident_domain_edge(self, x):
+        # A point on the IC-domain edge of one axis and on an interior frontier
+        # of another is both; the pool keeps the interior frontier, the stronger
+        # claim, so the demonstration is not masked by the coincident edge.
         witnesses = [assn(x_0_0=4.0)]
-        labels = [_DOMAIN]
+        labels = [_IC_DOMAIN]
         _merge_markers(witnesses, labels, [assn(x_0_0=4.0)], [_STRUCTURE_FRONTIER], [x],
                        lambda v: Fraction(1, 100), None)
-        assert labels == [_DOMAIN], "domain outranks a coincident structure-frontier"
+        assert labels == [_STRUCTURE_FRONTIER]
+
+    def test_a_domain_edge_does_not_downgrade_an_interior_frontier(self, x):
+        witnesses = [assn(x_0_0=4.0)]
+        labels = [_STRUCTURE_FRONTIER]
+        _merge_markers(witnesses, labels, [assn(x_0_0=4.0)], [_IC_DOMAIN], [x],
+                       lambda v: Fraction(1, 100), None)
+        assert labels == [_STRUCTURE_FRONTIER], "the interior claim is stronger"
 
     def test_coincidence_requires_every_axis(self, x, y):
         witnesses = [assn(x_0_0=4.0, y_0_0=1.0)]
@@ -509,7 +538,7 @@ class TestGrowBoxUnderEitherOracle:
                             tolerance=Fraction(1, 1000))
         witnesses, labels, box = self._grow(oracle, _Theta(Fraction(1, 4)))
         assert witnesses and len(witnesses) == len(labels)
-        assert set(labels) <= {_DEEP, _STRUCTURE_FRONTIER, _DOMAIN}
+        assert set(labels) <= {_DEEP, _STRUCTURE_FRONTIER, _IC_DOMAIN}
         lo, hi = box[x]
         assert Fraction(4) <= lo <= Fraction(5) <= hi <= Fraction(6)
 
@@ -1162,41 +1191,58 @@ class TestPivotMetricsAndClamp:
         assert numeric and all(b <= 0.2 for b in numeric), numeric
 
 
-class TestOpenRangeEdges:
-    """A face that runs to an OPEN declared edge is a domain face.
+class TestICDomainEdgeLabeling:
+    """A face reaching the effective IC-domain edge is a domain face; a bracket
+    strictly interior to it is a structure-frontier.
 
-    The encoding bounds an open range strictly, so the probe at the wall is
-    UNSAT for encoding reasons; with the inclusivity flags dropped, the
-    bisection then 'bracketed' against the edge itself and the face was
-    labeled structure-frontier -- the exact distinction the three labels exist
-    to make.
+    The wall is now the IC-domain edge, not the declared range. A falsifying set
+    that runs to within tolerance of that edge -- whether the encoding bounds it
+    open (the probe at the edge is UNSAT for encoding reasons and the bisection
+    brackets against the edge itself) or closed -- is a domain face; only a
+    bracket that stops well inside the edge is a structure-relative crossing.
+    The label a domain face earns is the plan's (``ic-domain`` /
+    ``projected-domain``), passed explicitly here.
     """
 
     @staticmethod
-    def _encoding_with_flags(hi_incl):
+    def _encoding():
         class _Enc:
-            range_dict = {Real("x"): (True, "0", "10", hi_incl)}
+            range_dict = {Real("x"): (True, "0", "10", True)}
             bound = 1
         return _Enc()
 
-    def _labels(self, hi_incl, x):
-        # Falsifying almost to the wall: within tol of 10, but not at it --
-        # geometrically indistinguishable from an open-edge encoding.
-        oracle = FakeOracle({x: (Fraction(4), Fraction(10) - Fraction(1, 4000))},
-                            tolerance=Fraction(1, 1000))
+    def _labels(self, falsifying, domain_label, x):
+        oracle = FakeOracle({x: falsifying}, tolerance=Fraction(1, 1000))
         alg = RegionBoxDiscovery()
         alg._config = None
         _, labels, _ = alg._grow_box(
-            oracle, assn(x_0_0=5), self._encoding_with_flags(hi_incl),
-            _Theta(Fraction(1, 4)), 20, 1, 4, _SilentPrinter())
+            oracle, assn(x_0_0=5), self._encoding(),
+            _Theta(Fraction(1, 4)), 20, 1, 4, _SilentPrinter(),
+            axis_ids=["x_0_0"], ic_edges={"x_0_0": (Fraction(0), Fraction(10))},
+            domain_label=domain_label)
         return labels
 
-    def test_an_open_edge_is_a_domain_face(self, x):
-        assert _DOMAIN in self._labels(False, x)
+    def test_reaching_the_edge_is_a_domain_face(self, x):
+        # Falsifying to within tol of both IC edges (0 and 10): both faces are
+        # domain faces, none an interior crossing.
+        labels = self._labels(
+            (Fraction(1, 10000), Fraction(10) - Fraction(1, 4000)), _IC_DOMAIN, x)
+        assert _IC_DOMAIN in labels and _STRUCTURE_FRONTIER not in labels
 
-    def test_a_closed_edge_stays_a_frontier(self, x):
-        labels = self._labels(True, x)
-        assert _DOMAIN not in labels and _STRUCTURE_FRONTIER in labels
+    def test_the_domain_label_is_the_plan_label(self, x):
+        # An initial set that is not a certified box labels its domain faces
+        # projected-domain, never ic-domain.
+        labels = self._labels(
+            (Fraction(1, 10000), Fraction(10) - Fraction(1, 4000)),
+            _PROJECTED_DOMAIN, x)
+        assert _PROJECTED_DOMAIN in labels and _IC_DOMAIN not in labels
+
+    def test_stopping_interior_is_a_structure_frontier(self, x):
+        # Falsifying only over [4, 6], well inside the IC edges at 0 and 10: both
+        # faces are interior crossings, labeled structure-frontier whatever the
+        # plan's domain label, and no face reaches the domain.
+        labels = self._labels((Fraction(4), Fraction(6)), _IC_DOMAIN, x)
+        assert _STRUCTURE_FRONTIER in labels and _IC_DOMAIN not in labels
 
 
 def test_ic_pivots_are_sorted_by_variable_id():
@@ -1350,3 +1396,246 @@ class TestTwoStepBackendGuard:
         alg._metrics = _Counter()
         _, model, _ = alg._pivot_at(_OneDepthEncoder(), 0, "LRA", 0, [])
         assert model is not None, "dreal must route through the two-step search"
+
+
+# ============================================== the initial-condition detector
+
+class TestConstValue:
+    """The numeric shapes an ``init`` bound can carry."""
+
+    def test_a_real_constant(self):
+        assert _const_value(RealVal("2.5")) == Fraction(5, 2)
+
+    def test_an_integer_constant(self):
+        assert _const_value(IntVal("3")) == Fraction(3)
+
+    def test_a_negated_constant(self):
+        # `- 0.2` parses to Neg(RealVal("0.2")).
+        assert _const_value(Neg(RealVal("0.2"))) == Fraction(-1, 5)
+
+    def test_a_variable_is_not_a_constant(self):
+        assert _const_value(Real("y")) is None
+
+    def test_a_boolean_constant_is_not_numeric(self):
+        assert _const_value(BoolVal("True")) is None
+
+
+class TestAxisBound:
+    """One ``init`` conjunct read as a per-axis bound, either orientation."""
+
+    ids = {"y", "psi"}
+
+    def test_var_on_the_left_upper(self):
+        assert _axis_bound(Leq(Real("y"), RealVal("2.5")), self.ids) == (
+            "y", None, Fraction(5, 2))
+
+    def test_var_on_the_left_lower(self):
+        assert _axis_bound(Geq(Real("y"), RealVal("0.5")), self.ids) == (
+            "y", Fraction(1, 2), None)
+
+    def test_const_on_the_left_is_a_lower_bound(self):
+        # 0.5 <= y  is  y >= 0.5
+        assert _axis_bound(Leq(RealVal("0.5"), Real("y")), self.ids) == (
+            "y", Fraction(1, 2), None)
+
+    def test_const_on_the_left_upper(self):
+        # 3 >= y  is  y <= 3
+        assert _axis_bound(Geq(RealVal("3"), Real("y")), self.ids) == (
+            "y", None, Fraction(3))
+
+    def test_an_equality_pins_both_sides(self):
+        assert _axis_bound(Eq(Real("y"), RealVal("0")), self.ids) == (
+            "y", Fraction(0), Fraction(0))
+
+    def test_a_negated_edge(self):
+        assert _axis_bound(Leq(Neg(RealVal("0.2")), Real("y")), self.ids) == (
+            "y", Fraction(-1, 5), None)
+
+    def test_a_non_declared_variable_is_not_an_axis(self):
+        assert _axis_bound(Eq(Int("m"), RealVal("0")), self.ids) is None
+
+    def test_a_relational_term_couples_two_variables(self):
+        assert _axis_bound(Leq(Real("y"), Real("psi")), self.ids) is None
+
+    def test_a_boolean_literal_is_not_a_bound(self):
+        assert _axis_bound(Not(Bool("r")), self.ids) is None
+
+
+class TestInitProjection:
+    """``init`` read as per-axis windows, and whether it is a certified box."""
+
+    rd = {Real("y"): (True, "0", "10", True),
+          Real("psi"): (True, "-5", "5", True)}
+
+    def test_a_pure_per_axis_conjunction_is_a_box(self):
+        init = And([Geq(Real("y"), RealVal("0.5")), Leq(Real("y"), RealVal("2.5")),
+                    Leq(RealVal("0.1"), Real("psi")),
+                    Leq(Real("psi"), RealVal("0.7"))])
+        per, is_box = _init_projection(init, self.rd)
+        assert is_box
+        assert per["y_0_0"] == [Fraction(1, 2), Fraction(5, 2)]
+        assert per["psi_0_0"] == [Fraction(1, 10), Fraction(7, 10)]
+
+    def test_a_mode_pin_clears_the_box_but_keeps_the_projection(self):
+        init = And([Eq(Int("m"), RealVal("0")),
+                    Geq(Real("y"), RealVal("0.5")), Leq(Real("y"), RealVal("2.5"))])
+        per, is_box = _init_projection(init, self.rd)
+        assert not is_box
+        assert per["y_0_0"] == [Fraction(1, 2), Fraction(5, 2)]
+
+    def test_a_boolean_literal_clears_the_box(self):
+        init = And([Not(Bool("r")), Geq(Real("y"), RealVal("0.5"))])
+        _, is_box = _init_projection(init, self.rd)
+        assert not is_box
+
+    def test_a_relational_conjunct_clears_the_box(self):
+        init = And([Leq(Real("y"), Real("psi")),
+                    Geq(Real("y"), RealVal("0.5"))])
+        _, is_box = _init_projection(init, self.rd)
+        assert not is_box
+
+    def test_a_nested_conjunction_is_flattened(self):
+        # car-linear and wat-poly nest the per-axis bounds under one inner And.
+        init = And([And([Geq(Real("y"), RealVal("0")), Leq(Real("y"), RealVal("1"))])])
+        per, is_box = _init_projection(init, self.rd)
+        assert is_box and per["y_0_0"] == [Fraction(0), Fraction(1)]
+
+    def test_an_equality_pins_an_axis(self):
+        per, _ = _init_projection(And([Eq(Real("y"), RealVal("0"))]), self.rd)
+        assert per["y_0_0"] == [Fraction(0), Fraction(0)]
+
+
+def test_parse_target_bounds_reads_name_lo_hi_triples():
+    assert _parse_target_bounds("y/0.5/2.5/psi/0.1/0.7") == {
+        "y_0_0": (Fraction(1, 2), Fraction(5, 2)),
+        "psi_0_0": (Fraction(1, 10), Fraction(7, 10))}
+
+
+def test_parse_target_bounds_reads_a_negative_edge():
+    assert _parse_target_bounds("r/-0.2/0.6") == {
+        "r_0_0": (Fraction(-1, 5), Fraction(3, 5))}
+
+
+def test_parse_target_bounds_of_nothing_is_empty():
+    assert _parse_target_bounds("") == {} and _parse_target_bounds(None) == {}
+
+
+class TestPreferLabel:
+    """An interior frontier is the stronger claim; a domain edge outranks deep."""
+
+    def test_a_frontier_outranks_a_domain_edge_either_way(self):
+        assert _prefer_label(_IC_DOMAIN, _STRUCTURE_FRONTIER) == _STRUCTURE_FRONTIER
+        assert _prefer_label(_STRUCTURE_FRONTIER, _IC_DOMAIN) == _STRUCTURE_FRONTIER
+        assert (_prefer_label(_PROJECTED_DOMAIN, _STRUCTURE_FRONTIER)
+                == _STRUCTURE_FRONTIER)
+
+    def test_a_domain_edge_outranks_deep(self):
+        assert _prefer_label(_DEEP, _IC_DOMAIN) == _IC_DOMAIN
+        assert _prefer_label(_DEEP, _PROJECTED_DOMAIN) == _PROJECTED_DOMAIN
+
+    def test_equal_rank_keeps_the_current_label(self):
+        assert _prefer_label(_IC_DOMAIN, _PROJECTED_DOMAIN) == _IC_DOMAIN
+
+
+class _Model:
+    """The two fields :func:`_ic_plan` reads off a model."""
+
+    def __init__(self, init, range_dict):
+        self.init = init
+        self.range_dict = range_dict
+
+
+_AUV_RD = {Real("x"): (True, "0", "10", True), Real("y"): (True, "-6", "6", True),
+           Real("psi"): (True, "-1.5", "1.5", True),
+           Real("r"): (True, "-1.5", "1.5", True),
+           Real("Vc"): (True, "-0.5", "0.5", True)}
+
+
+def _auv_init():
+    """The AUV initial condition: a mode pin, a pinned along-track origin, and
+    four per-axis interval bounds (one with a negated lower edge)."""
+    return And([Eq(Int("m"), RealVal("0")), Eq(Real("x"), RealVal("0")),
+                Leq(RealVal("0.5"), Real("y")), Leq(Real("y"), RealVal("2.5")),
+                Leq(RealVal("0.1"), Real("psi")), Leq(Real("psi"), RealVal("0.7")),
+                Leq(Neg(RealVal("0.2")), Real("r")), Leq(Real("r"), RealVal("0.6")),
+                Leq(RealVal("0"), Real("Vc")), Leq(Real("Vc"), RealVal("0.2"))])
+
+
+class TestICPlan:
+    """Axis selection, edges, and label under the two resolution paths."""
+
+    def _model(self):
+        return _Model(_auv_init(), _AUV_RD)
+
+    def test_auto_drops_the_axis_the_init_pins(self):
+        axes, _, _ = _ic_plan(_GenConfig(), self._model())
+        assert "x_0_0" not in axes
+        assert set(axes) == {"y_0_0", "psi_0_0", "r_0_0", "Vc_0_0"}
+
+    def test_auto_is_projected_when_init_is_not_a_box(self):
+        # The mode pin (a bound on a non-declared variable) clears is_box.
+        _, _, label = _ic_plan(_GenConfig(), self._model())
+        assert label == _PROJECTED_DOMAIN
+
+    def test_auto_edges_come_from_the_init_projection(self):
+        _, edges, _ = _ic_plan(_GenConfig(), self._model())
+        assert edges["y_0_0"] == (Fraction(1, 2), Fraction(5, 2))
+        assert edges["r_0_0"] == (Fraction(-1, 5), Fraction(3, 5))
+
+    def test_config_target_axes_is_authoritative_ic_domain(self):
+        cfg = _GenConfig(
+            target_axes="y/psi/r/Vc",
+            target_bounds="y/0.5/2.5/psi/0.1/0.7/r/-0.2/0.6/Vc/0/0.2")
+        axes, edges, label = _ic_plan(cfg, self._model())
+        assert label == _IC_DOMAIN
+        assert "x_0_0" not in axes
+        assert edges["y_0_0"] == (Fraction(1, 2), Fraction(5, 2))
+        assert edges["Vc_0_0"] == (Fraction(0), Fraction(1, 5))
+
+    def test_config_axes_without_bounds_fall_back_to_the_init_projection(self):
+        axes, edges, label = _ic_plan(
+            _GenConfig(target_axes="y/psi/r/Vc"), self._model())
+        assert label == _IC_DOMAIN
+        assert edges["y_0_0"] == (Fraction(1, 2), Fraction(5, 2))
+
+    def test_a_clean_box_init_auto_certifies_ic_domain(self):
+        rd = {Real("y"): (True, "-6", "6", True)}
+        init = And([Leq(RealVal("0.5"), Real("y")), Leq(Real("y"), RealVal("2.5"))])
+        axes, edges, label = _ic_plan(_GenConfig(), _Model(init, rd))
+        assert label == _IC_DOMAIN
+        assert edges["y_0_0"] == (Fraction(1, 2), Fraction(5, 2))
+
+    def test_an_axis_the_init_does_not_bound_takes_the_declared_range(self):
+        rd = {Real("y"): (True, "-6", "6", True), Real("z"): (True, "0", "4", True)}
+        init = And([Leq(RealVal("0.5"), Real("y")), Leq(Real("y"), RealVal("2.5"))])
+        _, edges, _ = _ic_plan(_GenConfig(), _Model(init, rd))
+        assert edges["z_0_0"] == (Fraction(0), Fraction(4))       # declared
+
+
+class TestValidateTargetKeys:
+    """target-axes / target-bounds are parse-checked before the first pivot."""
+
+    @staticmethod
+    def _rejects(**gen):
+        try:
+            validate_gen(_GenConfig(**gen))
+        except ValueError as error:
+            return str(error)
+        raise AssertionError(f"{gen} must be rejected")
+
+    def test_a_valid_pair_passes(self):
+        validate_gen(_GenConfig(
+            target_axes="y/psi/r/Vc",
+            target_bounds="y/0.5/2.5/psi/0.1/0.7/r/-0.2/0.6/Vc/0/0.2"))
+
+    def test_empty_target_axes_is_rejected(self):
+        assert "target-axes" in self._rejects(target_axes="")
+
+    def test_bounds_not_in_triples_are_rejected(self):
+        assert "triples" in self._rejects(target_bounds="y/0.5")
+
+    def test_a_non_numeric_edge_is_rejected(self):
+        assert "numbers" in self._rejects(target_bounds="y/lo/hi")
+
+    def test_an_inverted_edge_is_rejected(self):
+        assert "exceeds" in self._rejects(target_bounds="y/2.5/0.5")
