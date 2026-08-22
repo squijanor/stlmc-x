@@ -79,6 +79,36 @@ READING A VERDICT
                     and -inf compares below every edge and would read as a clean
                     `falsifier`. It is routed here instead.
 
+IS THE WITNESS A TRACE THE AUTOMATON CAN PRODUCE
+
+Robustness answers a different question from reachability. rho(0) says the
+property is violated along the reconstructed signal; it does not say the signal
+is a run the automaton admits. A run has to respect the discrete structure at
+every jump: the guard holds on the pre-jump state, the reset relates the pre-
+and post-jump states, and a segment's dwell equals the gap between its
+endpoints. A delta-sat witness is checked only against the encoding the backend
+was given, and a two-step encoding that fixes the discrete skeleton on an
+abstraction and refines the flow separately can hand back a point that jumps
+where the guard is false. Such a point may violate the property and still be no
+counterexample, because no run reaches it.
+
+`trace` records that check, alongside and orthogonal to the robustness verdict:
+a genuine counterexample is a `falsifier` or `marginal` verdict carried by a
+`consistent` trace. It reads the assignment's own boundary variables -- the
+values the encoding names x_k_t (segment k's exit), x_{k+1}_0 (segment k+1's
+entry), tau_k and time_k -- so it tests the point the backend returned rather
+than an interpolation of it. A transition is explained by a declared jump of the
+pre-jump mode whose reset the two states satisfy; among the jumps that explain
+it the guard is read on the pre-jump state, and the transition is
+`guard-violating` only when no explaining jump has a satisfied guard. A
+transition no declared jump explains is a stutter when the mode is unchanged and
+the state is carried identically, and a `reset-mismatch` otherwise; a dwell that
+disagrees with its endpoints is a `time-mismatch`. Every comparison is signed
+and takes backend_delta as its slack, so a guard met to within the backend's own
+precision is not called a violation. The check runs only on a payload that
+carries mode and jump structure; a reconstruction fixture without it is left
+unchecked, and `trace` is empty.
+
 SAMPLING IS PART OF THE MEASUREMENT, IN BOTH DIRECTIONS
 
 Robustness is computed on sampled points (the visualizer's default is 50 per
@@ -130,16 +160,26 @@ from scipy.integrate import odeint
 
 from ..constraints.constraints import (
     Add,
+    And,
     Arccos,
     Arcsin,
     Arctan,
+    BoolVal,
     Cos,
     Div,
+    Eq,
+    Geq,
+    Gt,
     Int,
     IntVal,
+    Leq,
+    Lt,
     Mul,
     Neg,
+    Neq,
+    Not,
     Ode,
+    Or,
     Pow,
     Real,
     RealVal,
@@ -149,7 +189,7 @@ from ..constraints.constraints import (
     Tan,
     Variable,
 )
-from ..constraints.operations import substitution
+from ..constraints.operations import get_vars, substitution
 from ..exception.exception import NotSupportedError
 from ..visualize.visualizer import (
     DiscreteSampler,
@@ -310,6 +350,169 @@ def _band_margin(rho0: float, tau: float, backend_delta: float) -> float:
     return min(abs(rho0 - edge) for edge in (-backend_delta, 0.0, tau))
 
 
+# ------------------------------------------------------------- trace check
+
+# A guard or reset met to within the backend's own precision is not a fault, so
+# every comparison takes backend_delta as slack; this is the floor under it, for
+# an exact pool that records none. A dwell is an equality the encoding builds
+# from a clock integral, so it holds to integration precision and only a gross
+# disagreement -- larger than any rounding -- is a structural fault.
+_TRACE_EPS = 1e-9
+_DWELL_TOL = 1e-2
+
+
+def _sat_margin(const: Any) -> float:
+    """Signed satisfaction of a variable-free constraint: >= 0 means satisfied.
+
+    The atom is evaluated after its variables have been replaced by their
+    assignment values, so `_num` -- the complete evaluator the flow already uses
+    -- sees only constants. An Eq is satisfied at equality, so its margin is the
+    negated distance between the sides; a conjunction is as satisfied as its
+    weakest term, a disjunction as its strongest.
+    """
+    if isinstance(const, (Geq, Gt)):
+        return _num(const.left, [], []) - _num(const.right, [], [])
+    if isinstance(const, (Leq, Lt)):
+        return _num(const.right, [], []) - _num(const.left, [], [])
+    if isinstance(const, Eq):
+        return -abs(_num(const.left, [], []) - _num(const.right, [], []))
+    if isinstance(const, Neq):
+        return abs(_num(const.left, [], []) - _num(const.right, [], []))
+    if isinstance(const, And):
+        return min(_sat_margin(c) for c in const.children)
+    if isinstance(const, Or):
+        return max(_sat_margin(c) for c in const.children)
+    if isinstance(const, Not):
+        return -_sat_margin(const.child)
+    if isinstance(const, BoolVal):
+        return 1.0 if const.value == "True" else -1.0
+    raise NotSupportedError(f"cannot evaluate \"{const}\" as a predicate")
+
+
+def _assn_val(assn, var_id: str):
+    """The assignment's value for a variable id, or None if it holds none."""
+    value = assn.get(Real(var_id))
+    return None if value is None else float(Fraction(str(value.value)))
+
+
+def _boundary_valuation(const, assn, bound: int, base_names, mode_ids):
+    """Map every variable of a jump to its value at the bound -> bound+1 edge.
+
+    A variable that is one of the model's own names is the pre-jump state, read
+    at x_k_t (a mode at m_k); one carrying the primed suffix the encoding adds
+    for a post-state is read at x_{k+1}_0 (a mode at m_{k+1}). Longest name
+    first, so a name that is a prefix of another does not capture it. Returns
+    None when the assignment holds none of a value the jump needs, so a jump
+    that cannot be evaluated is skipped rather than guessed.
+    """
+    valuation: Dict[Variable, RealVal] = {}
+    for var in get_vars(const):
+        base = next((name for name in base_names
+                     if var.id == name or var.id.startswith(name)), None)
+        is_post = base is not None and var.id != base
+        name = base if base is not None else var.id
+        if name in mode_ids:
+            value = _assn_val(assn, f"{name}_{bound + 1}" if is_post
+                              else f"{name}_{bound}")
+        else:
+            value = _assn_val(assn, f"{name}_{bound + 1}_0" if is_post
+                              else f"{name}_{bound}_t")
+        if value is None:
+            return None
+        valuation[var] = RealVal(str(value))
+    return valuation
+
+
+def _mode_at(assn, mode_name: str, bound: int):
+    """The mode index of a segment, from the mode variable or currentMode."""
+    value = _assn_val(assn, f"{mode_name}_{bound}")
+    if value is None:
+        value = _assn_val(assn, f"currentMode_{bound}")
+    return None if value is None else int(round(value))
+
+
+def _trace_faults(assn, modules, mode_var_dict, range_dict, backend_delta):
+    """Check guard, reset and dwell at every jump of the assignment's trace.
+
+    Returns (trace, guard_margin, dwell_slack). `trace` is "consistent",
+    "guard-violating", "reset-mismatch", "time-mismatch", or "" when the payload
+    carries no mode or jump structure to check against. `guard_margin` is the
+    smallest (most violated) guard margin over the jumps and `dwell_slack` the
+    largest dwell disagreement; both are None when nothing was checked.
+    """
+    mode_ids = {var.id for var in mode_var_dict.values()}
+    if not mode_ids or not any(module.get("jump") for module in modules):
+        return "", None, None
+    base_names = sorted({var.id for var in range_dict} | mode_ids,
+                        key=len, reverse=True)
+    mode_name = next(iter(mode_ids))
+    slack = max(backend_delta, _TRACE_EPS)
+
+    segments = 0
+    while _mode_at(assn, mode_name, segments) is not None:
+        segments += 1
+
+    trace = "consistent"
+    worst_guard = None
+    worst_dwell = None
+    for bound in range(segments - 1):
+        pre = _mode_at(assn, mode_name, bound)
+        if pre is None or pre >= len(modules):
+            continue
+
+        explaining_guards = []
+        for guard, reset in modules[pre].get("jump", {}).items():
+            valuation = _boundary_valuation(And([guard, reset]), assn, bound,
+                                            base_names, mode_ids)
+            if valuation is None:
+                continue
+            if _sat_margin(substitution(reset, valuation)) >= -slack:
+                explaining_guards.append(
+                    _sat_margin(substitution(guard, valuation)))
+
+        dwell = _assn_val(assn, f"time_{bound}")
+        tau_k = _assn_val(assn, f"tau_{bound}")
+        tau_next = _assn_val(assn, f"tau_{bound + 1}")
+        if dwell is not None and tau_k is not None and tau_next is not None:
+            gap = dwell - (tau_next - tau_k)
+            if worst_dwell is None or abs(gap) > abs(worst_dwell):
+                worst_dwell = gap
+            if abs(gap) > _DWELL_TOL and trace == "consistent":
+                trace = "time-mismatch"
+
+        if explaining_guards:
+            best = max(explaining_guards)
+            if worst_guard is None or best < worst_guard:
+                worst_guard = best
+            if best < -slack and trace in ("consistent", "time-mismatch"):
+                trace = "guard-violating"
+        elif not _is_stutter(assn, modules, range_dict, mode_name, bound, slack):
+            if trace in ("consistent", "time-mismatch"):
+                trace = "reset-mismatch"
+
+    return trace, worst_guard, worst_dwell
+
+
+def _is_stutter(assn, modules, range_dict, mode_name, bound, slack) -> bool:
+    """A transition no declared jump explains is legitimate only as a stutter:
+    the mode is unchanged and every continuous variable is carried identically
+    across the instant (the steady self-loop the encoding adds)."""
+    pre = _mode_at(assn, mode_name, bound)
+    post = _mode_at(assn, mode_name, bound + 1)
+    if pre is None or post is None or pre != post:
+        return False
+    for var in range_dict:
+        entry = _assn_val(assn, f"{var.id}_{bound + 1}_0")
+        exit_ = _assn_val(assn, f"{var.id}_{bound}_t")
+        if entry is None or exit_ is None or abs(entry - exit_) > slack:
+            return False
+    return True
+
+
+def _append_note(record: Dict[str, Any], message: str) -> None:
+    record["note"] = f"{record['note']}; {message}" if record["note"] else message
+
+
 def validate_ce(assn, rest, tau: float, backend_delta: float, formula,
                 samples: int = DEFAULT_SAMPLES):
     """Validate one counterexample. Returns (verdict, rho0, rho_min, rho_max)."""
@@ -381,6 +584,9 @@ def validate_pool(payload, samples: int = DEFAULT_SAMPLES, refine: bool = True,
             "rho0_shift": "",
             "stable": "",
             "resolved": "",
+            "trace": "",
+            "guard_margin": "",
+            "dwell_slack": "",
             "seconds": "",
             "note": "",
         }
@@ -430,6 +636,27 @@ def validate_pool(payload, samples: int = DEFAULT_SAMPLES, refine: bool = True,
         except Exception as exc:            # a reconstruction failure is a result
             rec["verdict"] = "error"
             rec["note"] = f"{type(exc).__name__}: {str(exc)[:120]}"
+        # The trace check is orthogonal to the robustness verdict and reads the
+        # assignment directly, so it runs whether or not reconstruction
+        # succeeded. On a payload without mode or jump structure it returns "".
+        try:
+            trace, guard_margin, dwell_slack = _trace_faults(
+                assn, rest[0], rest[1], rest[3], backend_delta)
+        except Exception as exc:
+            trace, guard_margin, dwell_slack = "error", None, None
+            _append_note(rec, f"trace check: {type(exc).__name__}")
+        rec["trace"] = trace
+        rec["guard_margin"] = ("" if guard_margin is None
+                               else f"{guard_margin:.12g}")
+        rec["dwell_slack"] = "" if dwell_slack is None else f"{dwell_slack:.12g}"
+        if trace == "guard-violating":
+            _append_note(rec, f"guard violated by {abs(guard_margin):.3g}: the "
+                              "witness is not a trace the automaton can produce")
+        elif trace == "reset-mismatch":
+            _append_note(rec, "a jump's reset matches no declared edge")
+        elif trace == "time-mismatch":
+            _append_note(rec, "a dwell disagrees with its endpoints by "
+                              f"{abs(dwell_slack):.3g}")
         rec["seconds"] = "%.2f" % (time.time() - started)
         records.append(rec)
         if progress is not None:
@@ -460,6 +687,11 @@ def summarize(records: List[Dict[str, Any]]) -> str:
     if unresolved:
         lines.append("  {:<12} {:>4}  (rho(0) within the measurement error of "
                      "a band edge)".format("edge", len(unresolved)))
+    traces = Counter(r["trace"] for r in records if r["trace"])
+    for trace in ("guard-violating", "reset-mismatch", "time-mismatch"):
+        if traces[trace]:
+            lines.append(f"  {trace:<14} {traces[trace]:>4}  (witness is not a "
+                         "trace the automaton can produce)")
     lines.append("  by label:")
     for (label, verdict), n in sorted(by_label.items()):
         lines.append("    {:<10} {:<12} {:>4}".format(label or "-", verdict, n))
