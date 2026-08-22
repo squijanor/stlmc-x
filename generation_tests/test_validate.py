@@ -12,10 +12,13 @@ cases a recorded pool of well-formed witnesses does not contain either.
 import pytest
 
 from stlmc.constraints.constraints import (
+    And,
     BoolVal,
+    Eq,
     Function,
     Geq,
     GloballyFormula,
+    Int,
     Interval,
     Ode,
     Real,
@@ -26,6 +29,7 @@ from stlmc.generation.validate import (
     _band_margin,
     _classify,
     _own_post_jump,
+    _trace_faults,
     pool_backend_delta,
     validate_ce,
     validate_pool,
@@ -247,3 +251,79 @@ class TestNonFiniteRobustness:
         # the band comparisons a non-finite number cannot inform are skipped
         assert rec["stable"] == ""
         assert rec["resolved"] == ""
+
+
+# ---- trace consistency ----------------------------------------------------
+#
+# The trace check reads the assignment's own boundary variables and asks whether
+# a jump is one the automaton admits. A two-mode model with one guarded jump
+# places a witness on either side of the guard; the values are chosen by hand,
+# not recorded from a run.
+
+_MODE = {"m": Int("m")}
+_RANGE = [Real("x")]
+
+
+def _jump_model():
+    """Two modes; mode 0 jumps to mode 1 under x >= 1.3, carrying x. Mode 1 is
+    terminal. A primed name carries a suffix, as the encoding writes it."""
+    guard = Geq(Real("x"), RealVal("1.3"))
+    reset = And([Eq(Int("m'"), RealVal("1")), Eq(Real("x'"), Real("x"))])
+    return [{"jump": {guard: reset}}, {"jump": {}}]
+
+
+def _two_segment_assn(x_exit, x_entry, post_mode=1, tau1=0.7, dwell=0.7):
+    return {
+        Real("m_0"): RealVal("0"), Real("m_1"): RealVal(str(post_mode)),
+        Real("x_0_t"): RealVal(str(x_exit)),
+        Real("x_1_0"): RealVal(str(x_entry)),
+        Real("tau_0"): RealVal("0"), Real("tau_1"): RealVal(str(tau1)),
+        Real("time_0"): RealVal(str(dwell)),
+    }
+
+
+class TestTraceCheck:
+    def test_a_jump_below_the_guard_is_flagged(self):
+        trace, guard_margin, _ = _trace_faults(
+            _two_segment_assn(1.12, 1.12), _jump_model(), _MODE, _RANGE, 0.0)
+        assert trace == "guard-violating"
+        assert guard_margin < 0
+
+    def test_a_jump_that_meets_the_guard_is_consistent(self):
+        trace, guard_margin, _ = _trace_faults(
+            _two_segment_assn(1.4, 1.4), _jump_model(), _MODE, _RANGE, 0.0)
+        assert trace == "consistent"
+        assert guard_margin > 0
+
+    def test_a_guard_met_within_the_backend_slack_is_not_a_violation(self):
+        # x_0_t = 1.2995 misses the guard by 5e-4, inside a 1e-3 backend delta.
+        trace, _, _ = _trace_faults(
+            _two_segment_assn(1.2995, 1.2995), _jump_model(), _MODE, _RANGE, 1e-3)
+        assert trace == "consistent"
+
+    def test_a_reset_no_edge_produces_is_a_mismatch(self):
+        # mode changes 0 -> 1 but x is not carried, so reset x' = x fails.
+        trace, _, _ = _trace_faults(
+            _two_segment_assn(1.4, 0.2), _jump_model(), _MODE, _RANGE, 0.0)
+        assert trace == "reset-mismatch"
+
+    def test_an_unchanged_mode_carried_identically_is_a_stutter(self):
+        # no declared jump reaches mode 0 from mode 0; identity makes it a
+        # stutter, which needs no guard.
+        trace, _, _ = _trace_faults(
+            _two_segment_assn(0.5, 0.5, post_mode=0), _jump_model(), _MODE,
+            _RANGE, 0.0)
+        assert trace == "consistent"
+
+    def test_a_dwell_that_disagrees_with_its_endpoints_is_flagged(self):
+        # tau_1 - tau_0 = 0.7 but time_0 = 0.9: a 0.2 disagreement.
+        trace, _, dwell_slack = _trace_faults(
+            _two_segment_assn(1.4, 1.4, dwell=0.9), _jump_model(), _MODE,
+            _RANGE, 0.0)
+        assert trace == "time-mismatch"
+        assert abs(dwell_slack) > 0.1
+
+    def test_a_payload_without_mode_structure_is_left_unchecked(self):
+        assn, rest = _trace([1], [0, 1], _const_flow())
+        trace, guard_margin, dwell = _trace_faults(assn, rest[0], {}, [], 0.0)
+        assert trace == "" and guard_margin is None and dwell is None
