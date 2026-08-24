@@ -7,7 +7,6 @@ should hold independently of which backend answers the queries and of whether a
 particular benchmark happens to exercise them.
 """
 
-from collections import Counter as _Counter
 from fractions import Fraction
 from time import sleep as _sleep
 
@@ -47,7 +46,6 @@ from stlmc.generation.box import (
     _too_close,
     _value_of,
     _verdict,
-    _WordRotation,
 )
 from stlmc.generation.common import gen_float, validate_gen
 from stlmc.generation.oracle import SAT, UNKNOWN, UNSAT
@@ -586,73 +584,6 @@ class _SilentPrinter:
 
 # ================================================== the pruning policy itself
 
-class TestWordRotation:
-    """word-rotate is a policy over candidate verdicts, and only a refutation
-    is one.
-
-    The oracle's UNKNOWN carries no information about the query that produced
-    it, so an expired per-candidate bound says the candidate was expensive, not
-    that its mode word is infeasible. Counting it as a rejection discards a word
-    for a solver reason -- measured doing exactly that on a goal whose published
-    counterexample lives at the discarded word's depth.
-    """
-
-    def test_consecutive_refutations_drop_the_word(self):
-        rotation = _WordRotation(3)
-        assert [rotation.refuted("0112") for _ in range(3)] == [False, False, True]
-        assert rotation.dropped == 1
-
-    def test_undecided_candidates_never_drop_a_word(self):
-        rotation = _WordRotation(3)
-        for _ in range(100):
-            rotation.undecided_candidate()
-        assert rotation.dropped == 0
-        assert rotation.undecided == 100
-
-    def test_undecided_candidates_do_not_advance_the_streak(self):
-        """The distinction the fix is about: fifty expiries and two refutations
-        are two refutations."""
-        rotation = _WordRotation(3)
-        rotation.refuted("0112")
-        for _ in range(50):
-            rotation.undecided_candidate()
-        assert rotation.refuted("0112") is False
-        assert rotation.streak == 2
-        assert rotation.refuted("0112") is True
-
-    def test_undecided_candidates_do_not_reset_the_streak_either(self):
-        """An UNKNOWN is evidence in neither direction, so a run of refutations
-        continues across one rather than restarting."""
-        rotation = _WordRotation(2)
-        rotation.refuted("0112")
-        rotation.undecided_candidate()
-        assert rotation.refuted("0112") is True
-
-    def test_a_different_word_restarts_the_streak(self):
-        rotation = _WordRotation(2)
-        assert rotation.refuted("aa") is False
-        assert rotation.refuted("bb") is False
-        assert rotation.refuted("bb") is True
-
-    def test_the_counter_resets_after_a_drop(self):
-        """One word is reported once per run of refutations, not once per
-        refutation past the limit."""
-        rotation = _WordRotation(2)
-        for _ in range(4):
-            rotation.refuted("aa")
-        assert rotation.dropped == 2
-
-    def test_zero_disables_the_heuristic(self):
-        rotation = _WordRotation(0)
-        assert not any(rotation.refuted("0112") for _ in range(100))
-        assert rotation.dropped == 0
-
-    def test_a_candidate_with_no_word_is_never_counted(self):
-        rotation = _WordRotation(1)
-        assert rotation.refuted("") is False
-        assert rotation.dropped == 0
-
-
 # ============================================== which bound the search hit
 
 class TestBindingBound:
@@ -685,35 +616,6 @@ class TestBindingBound:
 
 
 # ====================================================== the two-step search
-
-class _ScriptedSkeleton:
-    """The outer solver of the two-step pivot search, with its answers given.
-
-    It proposes one location word per check, from a script, and answers UNSAT
-    once the script is spent (``forever`` repeats the last word instead). Every
-    assertion is recorded, which is how a test sees whether a mode-word block --
-    the rotation heuristic's only effect on the search -- was ever posted."""
-
-    def __init__(self, words, forever=False):
-        self._words = list(words)
-        self._forever = forever
-        self.asserted = []
-        self._model = None
-
-    def assert_(self, formula):
-        self.asserted.append(formula)
-
-    def check(self):
-        if not self._words:
-            self._model = None
-            return UNSAT
-        self._model = self._words[0] if self._forever else self._words.pop(0)
-        return SAT
-
-    def model(self):
-        return {Real(f"currentMode_{k}"): RealVal(str(digit))
-                for k, digit in enumerate(self._model)}
-
 
 class _ScriptedCandidate:
     """The inner ODE-feasibility oracle for one candidate, with its verdict and
@@ -758,31 +660,6 @@ class _ScriptedCandidate:
         return {}
 
 
-class _ScriptedTwoStep(RegionBoxDiscovery):
-    """kappa_box with both pivot-search oracles given explicitly.
-
-    `_pivot_two_step` is otherwise reachable only through a delta backend on a
-    nonlinear model, which would measure dReal rather than the search. The two
-    oracle seams keep the verdict handling -- which is all the search decides on
-    its own -- testable here."""
-
-    def __init__(self, words, verdicts, forever=False, cost=0.0):
-        super().__init__()
-        self.skeleton = _ScriptedSkeleton(words, forever=forever)
-        self._verdicts = list(verdicts)
-        self._cost = cost
-        self.candidates = []
-
-    def _skeleton_oracle(self, logic, seed):
-        return self.skeleton
-
-    def _candidate_oracle(self, logic, seed):
-        verdict = self._verdicts.pop(0) if self._verdicts else UNSAT
-        oracle = _ScriptedCandidate(verdict, self._cost)
-        self.candidates.append(oracle)
-        return oracle
-
-
 class _Section:
     def __init__(self, values):
         self._values = values
@@ -817,110 +694,6 @@ class _Encoding:
     skeleton = BoolVal("True")
     consts = BoolVal("True")
     bound = 0
-
-
-def _two_step(words, verdicts, forever=False, cost=0.0, blocks=(), **gen):
-    """Run one candidate search against scripted oracles; returns the algorithm
-    (for its counters) and the search's own result."""
-    alg = _ScriptedTwoStep(words, verdicts, forever=forever, cost=cost)
-    alg._printer = _SilentPrinter()
-    alg._config = _GenConfig(**gen)
-    alg._logger = None
-    alg._tau_max = "8"
-    alg._underlying = "dreal"
-    alg._time_horizon = 8.0
-    alg._metrics = _Counter()
-    return alg, alg._pivot_two_step(_Encoding(), "LRA", 0, list(blocks))
-
-
-class TestTwoStepCandidateLoop:
-    """What the candidate loop does with each verdict.
-
-    The oracles are scripted rather than real: the search's own decisions are
-    which verdicts advance the heuristic and what it reports on giving up, and
-    neither depends on a solver.
-    """
-
-    def test_refutations_rotate_the_word_off(self):
-        alg, _ = _two_step(["0112"] * 40, [UNSAT] * 40,
-                           word_rotate=5, pivot_budget=30)
-        assert alg._rotated_words == 8, "one drop per five refutations"
-
-    def test_expiries_on_one_word_never_rotate_it_off(self):
-        """The measured defect: thirty consecutive pivot-timeout expiries on
-        word 0112 discarded it as if refuted."""
-        alg, _ = _two_step(["0112"] * 40, [UNKNOWN] * 40, pivot_budget=30)
-        assert alg._rotated_words == 0
-        assert alg._undecided_candidates == 40
-
-    def test_the_same_count_of_refutations_does_rotate(self):
-        """The contrast that makes the previous test about the verdict and not
-        about the count."""
-        alg, _ = _two_step(["0112"] * 40, [UNSAT] * 40, pivot_budget=30)
-        assert alg._rotated_words == 1
-
-    def test_expiries_do_not_interrupt_a_run_of_refutations(self):
-        alg, _ = _two_step(["0112"] * 6,
-                           [UNSAT, UNKNOWN, UNSAT, UNKNOWN, UNSAT, UNKNOWN],
-                           word_rotate=3, pivot_budget=30)
-        assert alg._rotated_words == 1
-        assert alg._undecided_candidates == 3
-
-    def test_an_accepted_candidate_returns_its_oracle(self):
-        alg, (oracle, model, encoding) = _two_step(
-            ["0112"] * 3, [UNSAT, UNSAT, SAT], pivot_budget=30)
-        assert oracle is alg.candidates[-1]
-        assert model is not None and encoding is not None
-        assert alg._metrics["accepted"] == 1
-
-    def test_an_undecided_candidate_is_still_blocked(self):
-        """It has to be, or z3 proposes it again forever; the loop must make
-        progress. What that costs is the exhaustion claim, not termination."""
-        alg, _ = _two_step(["0112"] * 4, [UNKNOWN] * 4, pivot_budget=30)
-        assert len(alg.candidates) == 4, "each expiry was followed by another"
-
-    def test_a_fast_refuting_search_blames_the_budget(self):
-        alg, (oracle, _, _) = _two_step(
-            ["0112"], [UNSAT] * 10_000, forever=True, pivot_budget=0.05)
-        assert oracle is None
-        assert alg._pivot_giveup[0] == "pivot-budget"
-
-    def test_a_search_spent_on_expiries_blames_the_per_call_bound(self):
-        alg, (oracle, _, _) = _two_step(
-            ["0112"], [UNKNOWN] * 10, forever=True, cost=0.04,
-            pivot_budget=0.05)
-        assert oracle is None
-        assert alg._pivot_giveup[0] == "pivot-timeout"
-
-class TestSkeletonVerdictRecording:
-    """What the two-step search records when the outer solver stops it.
-
-    The distinction it must preserve is UNSAT (structure space exhausted)
-    against UNKNOWN (the skeleton solver gave up within its bound): the caller
-    routes the first to an absence claim and the second to an UNRESOLVED
-    report, so collapsing them turns a resource failure into a verdict.
-    """
-
-    def test_a_spent_structure_space_records_unsat(self):
-        alg, (oracle, _, _) = _two_step(["01"], [UNSAT], pivot_budget=30)
-        assert oracle is None
-        assert alg._last_pivot_verdict == UNSAT
-
-    def test_a_skeleton_give_up_records_unknown_not_unsat(self):
-        """The defect: an undecided skeleton solve was recorded as UNSAT, so
-        the run claimed exhaustion for a query z3 gave up on."""
-        alg = _ScriptedTwoStep([], [])
-        alg.skeleton.check = lambda: UNKNOWN
-        alg._printer = _SilentPrinter()
-        alg._config = _GenConfig(pivot_budget="30")
-        alg._logger = None
-        alg._tau_max = "8"
-        alg._underlying = "dreal"
-        alg._time_horizon = 8.0
-        alg._metrics = _Counter()
-        oracle, _, _ = alg._pivot_two_step(_Encoding(), "LRA", 0, [])
-        assert oracle is None
-        assert alg._last_pivot_verdict == UNKNOWN
 
 
 class TestBoxBudget:
@@ -1004,24 +777,6 @@ class TestBlocksBindThePivotNotGrowth:
             assert alg._last_pivot_verdict == verdict
             assert not any(f is block for f in alg.oracle.live)
 
-    def test_delta_candidate_sees_the_blocks(self):
-        """The defect on this backend was the opposite: the blocks reached
-        only the outer skeleton solver, whose candidate pins no reals, so the
-        pivot dReal returned could sit inside an already-blocked box."""
-        block = _block_box({Real("x1_0_0"): (Fraction(0), Fraction(1))})
-        alg, (oracle, model, _) = _two_step(["01"], [SAT], pivot_budget=30,
-                                            blocks=[block])
-        assert model is not None
-        assert any(f is block for f in oracle.asserted), (
-            "the candidate oracle chooses the pivot; the blocks must bind it")
-
-    def test_delta_growth_is_not_walled_by_the_blocks(self):
-        block = _block_box({Real("x1_0_0"): (Fraction(0), Fraction(1))})
-        alg, (oracle, _, _) = _two_step(["01"], [SAT], pivot_budget=30,
-                                        blocks=[block])
-        assert not any(f is block for f in oracle.live)
-
-
 class TestValidateGen:
     """Range checks run before the first solver call.
 
@@ -1083,84 +838,6 @@ class TestValidateGen:
         assert gen_float(_GenConfig(), "pivot-budget") is None
 
 
-class _DictSkeleton(_ScriptedSkeleton):
-    """A skeleton oracle whose models are given as dicts, for mode words the
-    char-per-step script cannot express (values >= 10, steps >= 10)."""
-
-    def __init__(self, models):
-        super().__init__(words=[])
-        self._models = list(models)
-
-    def check(self):
-        if not self._models:
-            self._model = None
-            return UNSAT
-        self._model = self._models.pop(0)
-        return SAT
-
-    def model(self):
-        return {Real(f"currentMode_{k}"): RealVal(str(v))
-                for k, v in self._model.items()}
-
-
-class TestModeWordIdentity:
-    """The rotation streak is keyed by the mode word, so the word must be a
-    faithful identity of the path: positional (sorted by step index, not by
-    id string) and separated (no digit-join ambiguity)."""
-
-    @staticmethod
-    def _run(models, **gen):
-        alg = _ScriptedTwoStep([], [])
-        alg.skeleton = _DictSkeleton(models)
-        alg._printer = _SilentPrinter()
-        alg._config = _GenConfig(**gen)
-        alg._logger = None
-        alg._tau_max = "8"
-        alg._underlying = "dreal"
-        alg._time_horizon = 8.0
-        alg._metrics = _Counter()
-        alg._pivot_two_step(_Encoding(), "LRA", 0, [])
-        return alg
-
-    def test_different_paths_never_share_a_streak(self):
-        """(1,12) and (11,2) both rendered "112" under the separator-free
-        join, so refutations of two different paths accumulated into one
-        streak and could rotate off a feasible word."""
-        alg = self._run([{0: 1, 1: 12}, {0: 11, 1: 2}] * 2,
-                        word_rotate=2, pivot_budget=30)
-        assert alg._rotated_words == 0, (
-            "alternating distinct words must never reach a streak of 2")
-
-    def test_the_same_path_still_accumulates(self):
-        alg = self._run([{0: 1, 1: 12}] * 2, word_rotate=2, pivot_budget=30)
-        assert alg._rotated_words == 1
-
-    def test_the_word_is_ordered_by_step_index(self):
-        """currentMode_10 sorts lexicographically before currentMode_2: the
-        printed word was non-positional from depth 10 up."""
-        recorded = []
-
-        class _Recorder:
-            def print_normal(self, msg):
-                recorded.append(msg)
-
-            def print_verbose(self, msg):
-                recorded.append(msg)
-
-        alg = _ScriptedTwoStep([], [])
-        alg.skeleton = _DictSkeleton([{2: 5, 10: 7}])
-        alg._printer = _Recorder()
-        alg._config = _GenConfig(pivot_budget="30")
-        alg._logger = None
-        alg._tau_max = "8"
-        alg._underlying = "dreal"
-        alg._time_horizon = 8.0
-        alg._metrics = _Counter()
-        alg._pivot_two_step(_Encoding(), "LRA", 0, [])
-        words = [line for line in recorded if "(word " in line]
-        assert words and "(word 5.7)" in words[0], words
-
-
 class TestPivotMetricsAndClamp:
     def test_the_exact_pivot_counts_into_the_metrics(self):
         """The metrics line printed candidates=0 accepted=0 on every exact
@@ -1179,17 +856,6 @@ class TestPivotMetricsAndClamp:
         alg._pivot_at(_OneDepthEncoder(), 0, "LRA", 0, [])
         assert alg._metrics["candidates"] == 1
         assert alg._metrics["accepted"] == 0
-
-    def test_the_candidate_budget_is_clamped_to_the_deadline(self):
-        """One candidate could overrun the search deadline by a whole
-        pivot-timeout: the per-candidate budget must never exceed what is
-        left of pivot-budget."""
-        alg, _ = _two_step(["01"], [UNSAT] * 100, forever=True,
-                           pivot_budget=0.2, pivot_timeout=45)
-        numeric = [b for oracle in alg.candidates for b in oracle.budgets
-                   if isinstance(b, float)]
-        assert numeric and all(b <= 0.2 for b in numeric), numeric
-
 
 class TestICDomainEdgeLabeling:
     """A face reaching the effective IC-domain edge is a domain face; a bracket
@@ -1384,19 +1050,6 @@ class TestTwoStepBackendGuard:
         alg._config = _GenConfig()
         _, pivot, _ = alg._pivot_at(_OneDepthEncoder(), 0, "LRA", 0, [])
         assert pivot is not None
-
-    def test_dreal_still_takes_the_two_step_path(self):
-        alg = _ScriptedTwoStep(["01"], [SAT])
-        alg._printer = _SilentPrinter()
-        alg._config = _GenConfig(pivot_budget="30")
-        alg._logger = None
-        alg._tau_max = "8"
-        alg._underlying = "dreal"
-        alg._time_horizon = 8.0
-        alg._metrics = _Counter()
-        _, model, _ = alg._pivot_at(_OneDepthEncoder(), 0, "LRA", 0, [])
-        assert model is not None, "dreal must route through the two-step search"
-
 
 # ============================================== the initial-condition detector
 

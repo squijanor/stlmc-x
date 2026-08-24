@@ -87,23 +87,17 @@ from ..constraints.constraints import (
     BoolVal,
     Constant,
     Eq,
-    Forall,
     Formula,
     Geq,
     Gt,
-    Implies,
     Leq,
     Lt,
     Neg,
-    Neq,
     Not,
     Or,
-    Real,
     RealVal,
-    Sub,
     Variable,
 )
-from ..constraints.operations import substitution_zero2t
 from ..objects.algorithm import Algorithm
 from .common import (
     MODE_RE,
@@ -129,6 +123,7 @@ from .oracle import (
     make_oracle,
     query_timeout,
 )
+from .reduced import ReducedPivotSearch
 
 # Face-search precision on an exact oracle when [gen] bisect-iters is not set:
 # the located frontier is within theta * 2**-_BISECT_ITERS of the true crossing.
@@ -201,60 +196,6 @@ def _value_of(assn: dict[Variable, Constant], var: Variable) -> Fraction:
     raise KeyError(var.id)
 
 
-_FA_PREFIX = "__fa_"
-
-
-def _abstract_foralls(formula, memo=None, counter=None):
-    """Replace every ``Forall`` subformula with a fresh Bool, structurally.
-
-    z3 cannot translate ``forall_t`` nodes, so the skeleton cannot be handed to
-    it directly. Abstracting them preserves the Boolean structure exactly -- an
-    Or stays an Or -- which a clause-level filter does not. Identical Forall
-    nodes share one Bool, so z3 cannot pick contradictory truth values for the
-    same condition.
-
-    Returns ``(rewritten_formula, {fresh_Bool: original_Forall})``."""
-    if memo is None:
-        memo, counter = {}, [0]
-
-    def go(f):
-        if isinstance(f, Forall):
-            # Forall.__hash__ is hash("(forall <mode> . <const>)") and omits the
-            # segment bounds, so two forall_t over DIFFERENT segments could share
-            # one Bool and be forced to the same truth value. Key on the full
-            # segment identity instead.
-            key = (str(f.current_mode_number), str(f.start_tau),
-                   str(f.end_tau), str(f.const))
-            if key not in memo:
-                b = Bool(f"{_FA_PREFIX}{counter[0]}")
-                counter[0] += 1
-                memo[key] = (b, f)
-            return memo[key][0]
-        if isinstance(f, And):
-            return And([go(c) for c in f.children])
-        if isinstance(f, Or):
-            return Or([go(c) for c in f.children])
-        if isinstance(f, Not):
-            return Not(go(f.child))
-        if isinstance(f, Implies):
-            return Implies(go(f.left), go(f.right))
-        # forall_t also hides inside the abstraction definitions, which are
-        # Eq(<abstraction Bool>, <formula containing forall_t>). Descend into
-        # Eq/Neq operands too; non-Boolean operands come back unchanged.
-        if isinstance(f, Eq):
-            return Eq(go(f.left), go(f.right))
-        if isinstance(f, Neq):
-            return Neq(go(f.left), go(f.right))
-        return f
-
-    out = go(formula)
-    return out, {b: orig for (b, orig) in memo.values()}
-
-
-def _mode_fix(assn: dict[Variable, Constant]) -> Formula:
-    """AND_k (currentMode_k == value) pinning the pivot's path."""
-    terms = [Eq(v, c) for v, c in assn.items() if MODE_RE.match(v.id)]
-    return And(terms) if terms else BoolVal("True")
 
 
 def _skeleton_fix(assn: dict[Variable, Constant]) -> Formula:
@@ -550,59 +491,6 @@ class _Theta:
                 f" (fallback {float(self.absolute)})")
 
 
-class _WordRotation:
-    """The ``word-rotate`` coverage heuristic, as a policy over verdicts.
-
-    A mode word is dropped after ``limit`` consecutive **refutations** of
-    candidates carrying it. Only UNSAT is one. An UNKNOWN carries no information
-    about the query that produced it -- it says the candidate was expensive, not
-    that its word is infeasible -- so an expired per-candidate bound may neither
-    advance the streak nor reset it: undecided candidates are stepped over and
-    the run of refutations continues across them.
-
-    Counting an expiry as a refutation discards a word for a solver reason. It
-    was measured doing exactly that: a depth-3 word whose candidates each hit a
-    60 s ``pivot-timeout`` was blocked after 30 of them, on a goal whose
-    published counterexample lives at that depth.
-
-    ``limit = 0`` disables the heuristic, and a candidate with no mode word is
-    never counted.
-    """
-
-    def __init__(self, limit: int) -> None:
-        self.limit = limit
-        self.dropped = 0        # words blocked by the heuristic
-        self.undecided = 0      # candidates the oracle did not decide
-        self._word = None
-        self._streak = 0
-
-    @property
-    def streak(self) -> int:
-        """Consecutive refutations of the word currently under the counter."""
-        return self._streak
-
-    def refuted(self, word) -> bool:
-        """Record a refutation of a candidate carrying ``word``.
-
-        Returns True when that word has reached the limit and must be blocked;
-        the counter is reset then, so one word is reported once per run of
-        refutations."""
-        if not self.limit or not word:
-            return False
-        self._streak = self._streak + 1 if word == self._word else 1
-        self._word = word
-        if self._streak >= self.limit:
-            self._word, self._streak = None, 0
-            self.dropped += 1
-            return True
-        return False
-
-    def undecided_candidate(self) -> None:
-        """Record a candidate the oracle left undecided. Deliberately does not
-        touch the streak: an UNKNOWN is evidence in neither direction."""
-        self.undecided += 1
-
-
 def _binding_bound(attempts, refuted, undecided, undecided_seconds, elapsed):
     """Which ``[gen]`` key bounded a candidate search that gave up, and why.
 
@@ -766,110 +654,66 @@ class RegionBoxDiscovery(Algorithm):
     def set_debug(self, msg: str) -> None:
         self.debug_name = msg
 
-    def _skeleton_oracle(self, logic, seed):
-        """The outer, purely propositional solver of the two-step pivot search.
-
-        Built directly rather than through make_oracle, which cannot express
-        general=True, so the configured bound has to be resolved and passed
-        here; otherwise the skeleton solve silently keeps the constructor's
-        default. It is a method rather than an inline construction so a test can
-        substitute an oracle whose answers are given explicitly and exercise the
-        candidate loop without a solver."""
-        return Z3IncrementalOracle(logic, seed, general=True,
-                                   timeout=query_timeout(self._config))
-
     def _candidate_oracle(self, logic, seed):
         """The inner ODE-feasibility oracle, one per candidate. This site is on
-        the delta path too, since a delta backend always takes the two-step
-        route. Substitutable for the same reason as :meth:`_skeleton_oracle`."""
+        the delta path, since a delta backend always takes the two-step route.
+        A method so a test can substitute an oracle without a solver."""
         return make_oracle(self._underlying, logic=logic, seed=seed,
                            config=self._config, logger=self._logger,
                            time_bound=self._tau_max)
 
     def _exact_oracle(self, logic, seed):
-        """The single-query pivot oracle of the exact path. A method for the
-        same reason as :meth:`_skeleton_oracle`: a test substitutes it to
-        exercise the block-frame discipline without a solver."""
+        """The single-query pivot oracle of the exact path. A method so a test
+        can substitute it to exercise the block-frame discipline without a
+        solver."""
         return Z3IncrementalOracle(logic, seed,
                                    timeout=query_timeout(self._config))
 
-    def _pivot_two_step(self, encoding, logic, seed, blocks):
-        """Find a pivot in two steps, as STLMC's own checking does.
+    def _reduced_pivot_search(self, encoding, encoder, seed):
+        """The reduced-query pivot source for the delta two-step. A method so a
+        test can substitute a scripted search without a solver. The default
+        builds the base checker's un-collapsed STL + model components -- encode_at
+        collapses them into the monolithic stl_const, so they are rebuilt here,
+        which repopulates model.boolean_abstract, harmless because the delta path
+        never reads encoding.consts -- and hands them to ``ReducedPivotSearch``."""
+        if encoder is None:
+            raise ValueError(
+                "the two-step reduced pivot needs the encoder to expose STL "
+                "components; _pivot_at must pass it through")
+        components = encoder.enumerate_components_at(encoding.bound)
+        qsec = query_timeout(self._config)
+        timeout_ms = None if qsec is None else max(1, int(qsec * 1000))
+        return ReducedPivotSearch(components, encoder.model, seed=seed,
+                                  timeout_ms=timeout_ms)
 
-        A monolithic pivot query hands dReal the whole boolean abstraction and
-        every ODE at once, so interval propagation branches over boolean
-        structure while integrating, and the query is undecided at all but the
-        shallowest depths. Instead:
+    def _pivot_two_step(self, encoding, logic, seed, blocks, encoder=None):
+        """Two-step delta pivot on the base checker's reduced query.
 
-          1. z3 solves ``encoding.skeleton`` -- the propositional/arithmetic
-             structure with every ODE and forall_t still behind its abstraction
-             Bool. Nonlinear terms never reach z3, so this is fast.
-          2. dReal is asked only whether that ONE concrete skeleton is
-             ODE-feasible, with the whole boolean assignment pinned. That is a
-             pure feasibility question and is the shape dReal is good at.
-          3. On unsat, the skeleton is blocked in z3 and step 1 repeats.
+        A monolithic pivot query hands dReal ``encoding.consts``, which keeps
+        every quantified subformula (the ~60 forall_t on AUV-ode f2 depth 2) no
+        matter what is pinned, so interval propagation is undecided at all but the
+        shallowest depths. Instead this reconstructs, per falsifying structure,
+        the base checker's reduced query -- only the core-selected property
+        forall_t plus the full model execution -- and hands THAT to dReal.
+        Because the returned oracle carries the reduced query, growth -- which
+        re-solves on the same oracle -- inherits the reduction; there is no
+        separate growth change. Sound for the same reason the base checker is:
+        the reconstruction is the base checker's own (``ReducedPivotSearch``
+        transcribes ``scenario_check``), and the full model execution is retained
+        so no jump guard is dropped (the base checker's guard-drop witness bug is
+        avoided).
+
+        Returns ``(oracle, model, encoding)`` for a falsifying pivot outside
+        every block, else ``(None, None, None)`` with ``_last_pivot_verdict`` /
+        ``_pivot_giveup`` set.
         """
         printer = self._printer
         self._pivot_giveup = None
-        from ..tree.operations import size_of_tree as _sz
-        _t = _time.monotonic()
-        abstracted, fa_map = _abstract_foralls(encoding.skeleton)
-        self._printer.print_verbose(
-            f"[diag] skeleton size={_sz(encoding.skeleton)} "
-            f"consts size={_sz(encoding.consts)} "
-            f"abstract_time={_time.monotonic() - _t:.1f}s")
-        z3o = self._skeleton_oracle(logic, seed)
-        z3o.assert_(abstracted)
+        rp = self._reduced_pivot_search(encoding, encoder, seed)
+        # kappa_box's IC region blocks bind the pivot search (Alg. 2): a pivot
+        # must fall outside every already-grown box.
         for block in blocks:
-            z3o.assert_(block)
-
-        # Endpoint implications.
-        # forall_t phi over [tau_i, tau_i+1] implies phi at ANY time in the
-        # interval, in particular at both endpoints. phi is written over the
-        # segment's START copy; substitution_zero2t gives the END copy. This is
-        # a necessary condition, so it can only remove candidates that dReal
-        # would have rejected anyway.
-        #
-        # Timing facts z3 cannot see.
-        # Two constraints exist ONLY on the dReal side and are invisible to the
-        # z3 step, so z3 happily proposes skeletons dReal must reject:
-        #   (a) segment durations are declared [0, time-horizon] in the SMT2
-        #       declarations, not asserted anywhere in `consts`;
-        #   (b) time_k = tau_{k+1} - tau_k holds only via the clock ODE
-        #       (d/dt[g@clock] = 1), which is hidden behind an abstraction Bool.
-        # Both must therefore be asserted here. With time-horizon equal to
-        # time-bound (a) is nearly vacuous; under a tighter horizon it rejects
-        # every candidate that ignores it.
-        horizon = getattr(self, "_time_horizon", None)
-        n_seg = encoding.bound + 1
-        timing = []
-        for k in range(n_seg):
-            t_k = Real(f"time_{k}")
-            timing.append(Geq(t_k, RealVal("0")))
-            if horizon is not None:
-                timing.append(Leq(t_k, RealVal(repr(horizon))))
-            timing.append(Eq(t_k, Sub(Real(f"tau_{k + 1}"),
-                                      Real(f"tau_{k}"))))
-        for t in timing:
-            z3o.assert_(t)
-
-        for b, fa in fa_map.items():
-            endpoints = And([fa.const, substitution_zero2t(fa.const)])
-            z3o.assert_(Implies(b, endpoints))
-        self._printer.print_verbose(
-            f"[kappa_box/two-step] z3 skeleton: {len(fa_map)} forall_t "
-            f"abstracted, {len(timing)} timing facts, endpoint implications on")
-
-        # Word rotation. z3 exhausts the forall assignments of one mode word
-        # before trying another, so a refuted word can absorb the whole budget.
-        # After N consecutive refutations under the same word the word is
-        # blocked outright, at no solver cost. A heuristic: it can block a word
-        # that would have been feasible under a later assignment, trading
-        # completeness for coverage, which is why an exhausted search is not
-        # reported as absence once it has fired. 0 disables. Only a refutation
-        # counts -- see _WordRotation.
-        rotate = gen_int(self._config, "word-rotate")
-        rotation = _WordRotation(30 if rotate is None else rotate)
+            rp.add_block(block)
 
         every = gen_int(self._config, "log-every")
         every = _DEFAULT_LOG_EVERY if every is None else every
@@ -878,81 +722,40 @@ class RegionBoxDiscovery(Algorithm):
         candidate_bound = gen_float(self._config, "pivot-timeout")
         if candidate_bound is None:
             candidate_bound = _DEFAULT_CANDIDATE_TIMEOUT
+
+        printer.print_normal(
+            "[kappa_box/two-step] dReal gets the base-checker REDUCED query "
+            "(core-selected property forall_t + full model execution), not "
+            "consts; refuted structures blocked structure-wide")
+
         started = _time.monotonic()
         deadline = started + budget
         attempt, refuted, undecided_seconds = 0, 0, 0.0
         while _time.monotonic() < deadline:
             attempt += 1
             self._metrics["candidates"] += 1
-            _tz = _time.monotonic()
-            _v0 = z3o.check()
-            if attempt == 1:
-                self._printer.print_verbose(
-                    f"[diag] first z3 check: {_v0} in {_time.monotonic() - _tz:.1f}s")
-            if _v0 != SAT:
-                # UNSAT exhausts the structure space; UNKNOWN means the
-                # skeleton solver gave up within its bound. Collapsing them
-                # would report "no more boxes" for a resource failure -- the
-                # same rule the exact path applies in _pivot_at.
-                self._last_pivot_verdict = _v0
+            res = rp.next()
+            if res is None:
+                # UNSAT exhausts the structure space; UNKNOWN means the scenario
+                # solver gave up within its bound -- kept apart, as the skeleton
+                # path keeps them, so a resource failure is never reported as
+                # "no more boxes".
+                self._last_pivot_verdict = (
+                    UNSAT if rp.last_verdict() == UNSAT else UNKNOWN)
                 return None, None, None
-            candidate = z3o.model()
-            # Positional: sorted by the STEP INDEX and joined with a
-            # separator. The lexicographic digit join sorted currentMode_10
-            # before currentMode_2 and rendered (1,12) and (11,2) identically
-            # ("112"), so at >= 10 modes or depth >= 10 two different paths
-            # could share one rotation streak -- and a feasible word could be
-            # rotated off on another word's refutations.
+            total_const, path_const, assn = res
             word = ".".join(
                 str(int(round(float(c.value))))
                 for v, c in sorted(
-                    ((v, c) for v, c in candidate.items()
-                     if MODE_RE.match(v.id)),
+                    ((v, c) for v, c in assn.items() if MODE_RE.match(v.id)),
                     key=lambda kv: int(MODE_RE.match(kv[0].id).group(1))))
-            mode_only = And([Eq(v, c) for v, c in candidate.items()
-                             if MODE_RE.match(v.id)]) if word else BoolVal("True")
-
-            # Pin only what exists in the real encoding; the fresh forall_t Bools
-            # do not, so their z3 truth values are replayed as the ORIGINAL
-            # forall_t formula (or its negation) for dReal to check.
-            real = {v: c for v, c in candidate.items()
-                    if not v.id.startswith(_FA_PREFIX)}
-            fa_terms = []
-            for b, orig in fa_map.items():
-                for v, c in candidate.items():
-                    if v.id == b.id:
-                        fa_terms.append(orig if str(c.value) == "True" else Not(orig))
-                        break
-            pinned = And([_skeleton_fix(real)] + fa_terms) if fa_terms \
-                else _skeleton_fix(real)
-            # Block exactly what was tested: the candidate is checked with the
-            # whole propositional assignment pinned, so a rejection refutes that
-            # assignment and nothing more. Blocking the (mode word, forall) class
-            # instead would exclude assignments never tried, and the number
-            # discarded per rejection grows with depth.
-            #
-            # This is the z3-expressible counterpart of `pinned`, including the
-            # forall_t abstraction Bools whose truth values selected the formulas
-            # pinned for dReal; `pinned` itself carries real forall_t nodes and
-            # cannot go back into z3.
-            block_this = _skeleton_fix(candidate)
 
             d = self._candidate_oracle(logic, seed)
-            # Clamped to what is left of the search budget, so one candidate
-            # cannot overrun the deadline by a whole pivot-timeout. (The z3
-            # skeleton call above is bounded by query-timeout at construction,
-            # so the residual overrun of one iteration is at most that.)
             d.set_budget(min(candidate_bound,
                              max(deadline - _time.monotonic(), 0.1)))
-            d.assert_(encoding.consts)
-            d.assert_(pinned)
-            # The region blocks must bind THIS oracle too. They are asserted
-            # into z3o above, but z3's candidate only pins modes and Bools:
-            # the pivot the run uses is this oracle's model, whose reals are
-            # otherwise free to sit inside an already-blocked box -- and this
-            # oracle is also what grows the box, so unblocked it regrows the
-            # same region. Framed so growth still runs on Enc_n[w] alone,
-            # mirroring _pivot_at (including the no-empty-frame rule there).
+            d.assert_(total_const)
+            # Blocks bind the pivot, never growth: a popped frame, mirroring
+            # _pivot_two_step and _pivot_at.
             if blocks:
                 d.push()
                 for block in blocks:
@@ -961,46 +764,32 @@ class RegionBoxDiscovery(Algorithm):
             v = d.check()
             _el = _time.monotonic() - _t0
             d.set_budget("unset")
-            # An expiry is always printed: it costs the whole per-candidate
-            # bound, so it is both rare and the thing a short search has to be
-            # read against.
             if v != UNSAT or attempt % every == 0 or attempt == 1:
                 printer.print_verbose(
-                    "[kappa_box/two-step] candidate {} (word {}): dreal says {} "
-                    "({:.1f}s)".format(attempt, word or "-", v, _el))
+                    "[kappa_box/two-step] reduced candidate {} (word {}): dreal "
+                    "says {} ({:.1f}s)".format(attempt, word or "-", v, _el))
             if v == SAT:
                 self._metrics["accepted"] += 1
                 model = d.model()  # before pop(): pop clears the model state
                 if blocks:
                     d.pop()
                 return d, model, encoding
-            # Not usable *as tested*: block exactly the assignment that was
-            # checked so the search moves on. What that block is worth differs
-            # by verdict -- UNSAT refutes the assignment, UNKNOWN only records
-            # that it was tried -- and only the refutation is evidence about the
-            # word it carries.
-            z3o.assert_(Not(block_this))
+            # rp already blocked this structure (Not(path_const)); a refutation
+            # rules out the whole structure under every property decomposition,
+            # so the block is structure-wide, matching the free mode.
             if v == UNSAT:
                 refuted += 1
-                if rotation.refuted(word):
-                    z3o.assert_(Not(mode_only))
-                    self._rotated_words += 1
-                    printer.print_verbose(
-                        f"[kappa_box/two-step] rotating off word {word} after "
-                        f"{rotation.limit} consecutive refutations")
             else:
-                rotation.undecided_candidate()
                 undecided_seconds += _el
                 self._undecided_candidates += 1
 
         elapsed = _time.monotonic() - started
         self._pivot_giveup = _binding_bound(
-            attempt, refuted, rotation.undecided, undecided_seconds, elapsed)
+            attempt, refuted, 0, undecided_seconds, elapsed)
         printer.print_normal(
-            f"[kappa_box/two-step] gave up after {attempt} candidates: "
-            f"{refuted} refuted, {rotation.undecided} undecided at "
-            f"[gen] pivot-timeout = {candidate_bound}s, "
-            f"{rotation.dropped} mode word(s) rotated off")
+            f"[kappa_box/two-step] reduced: gave up after {attempt} "
+            f"candidates: {refuted} refuted, {undecided_seconds:.0f}s "
+            f"undecided at [gen] pivot-timeout={candidate_bound}s")
         self._last_pivot_verdict = UNKNOWN
         return None, None, None
 
@@ -1033,7 +822,7 @@ class RegionBoxDiscovery(Algorithm):
                     "backend, whose closed-interval and clock realization the "
                     "asserted timing and endpoint facts depend on; backend "
                     f"'{underlying}' cannot take it")
-            return self._pivot_two_step(encoding, logic, seed, blocks)
+            return self._pivot_two_step(encoding, logic, seed, blocks, encoder)
         # Only the exact backend reaches here; a delta backend always takes the
         # two-step path above.
         oracle = self._exact_oracle(logic, seed)
