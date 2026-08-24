@@ -13,12 +13,23 @@ name from the modules that provide them.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
-from ..constraints.constraints import And, BoolVal, Constant, Formula, Variable
-from ..constraints.operations import substitution
-from ..encoding.enumerate import make_boolean_abstract_consts
+from ..constraints.constraints import And, BoolVal, Constant, Formula, Not, Variable
+from ..constraints.operations import (
+    reduce_not,
+    relaxing,
+    remove_binary,
+    substitution,
+)
+from ..encoding.enumerate import (
+    calc_sub_formulas,
+    chi,
+    k_depth_stl_consts,
+    make_boolean_abstract_consts,
+    time_ordering,
+)
 from ..encoding.monolithic import clause, k_size_stl_formula
 from ..encoding.static_learning import StaticLearner
 from ..objects.goal import Goal, ReachGoal
@@ -31,19 +42,87 @@ class Encoding:
 
     ``consts`` is ``model_const AND contradiction AND stl_const AND
     boolean_abstract_consts`` at ``bound`` -- the same conjunction
-    ``SmtAlgorithm.run`` passes to the solver. ``boolean_abstract`` maps the
-    abstraction Bools to their defining formulas (needed by non-z3 backends).
+    ``SmtAlgorithm.run`` passes to the solver, and what the exact path hands the
+    solver directly. ``boolean_abstract`` maps the abstraction Bools to their
+    defining formulas. The delta path does not read ``consts``: it reconstructs a
+    reduced query from :meth:`Encoder.enumerate_components_at` instead.
     """
 
     consts: Formula
-    #: ``consts`` WITHOUT the boolean-abstraction definitions: the propositional
-    #: and arithmetic skeleton, with every ODE / forall_t term still hidden
-    #: behind its abstraction Bool, so z3 can solve it even for a nonlinear
-    #: model. Required by the two-step pivot.
-    skeleton: Formula
     boolean_abstract: dict
     bound: int
     range_dict: dict
+
+
+@dataclass
+class StlComponents:
+    """The base checker's STL + model components, un-collapsed, exposed per depth.
+
+    ``encode_at`` builds the MONOLITHIC ``stl_const`` (via ``k_size_stl_formula``),
+    which reconstructs the property path over ALL of its Bools, so
+    ``encoding.consts`` carries every property ``forall_t``. That is the whole
+    cost the two-step pivot cannot get under while it pins onto ``consts``: no
+    matter what Booleans are pinned on top, ``consts`` keeps all the quantified
+    subformulas dReal must integrate.
+
+    The base checker (``EnumerateAlgorithm``) is fast on the identical encoding
+    because it does not pin onto ``consts`` -- it REPLACES it, reconstructing a
+    reduced query (``assn2path`` / ``path2const`` / ``time_path2const``) that
+    carries ONLY the core-selected ``forall_t``. To port that into ``box.py`` the
+    two-step needs the same raw material the base checker's ``run`` holds when it
+    calls ``scenario_check`` at a given bound: the accumulated per-bound STL goal
+    and timing definitions, the final condition, the time order, ``sub_formulas``,
+    and the model consts (both the non-final ``k_model_f`` and the final
+    ``model_f_k_final``). This dataclass is exactly that state, un-collapsed.
+
+    Every field is computed the same way ``EnumerateAlgorithm.run`` computes it
+    (``encoding/enumerate.py``); the reuse is deliberate so the two cannot drift.
+    Fields map to ``scenario_check``'s parameters as:
+
+      - ``model_consts[b]``          -> ``acc_model[b]`` (``k_model_f``)
+      - ``model_f_k_final``          -> ``model_f_k_final`` (final model consts)
+      - ``stl_consts[b]``            -> ``acc_stl[b]`` (``k_stl_f``)
+      - ``stl_time_consts[b]``       -> ``acc_stl_time[b]`` (``k_stl_time_f``)
+      - ``final_f_k``                -> ``stl_final``
+      - ``time_order_const``         -> ``stl_time_order``
+      - ``sub_formulas``             -> ``sub_formulas``
+
+    so a caller can build ``current_minimize_info`` (``enumerate.py:199``),
+    minimize against it, and reconstruct the property path -- without re-reading
+    config (``tau_max`` / ``delta`` are carried) and without touching the
+    monolithic ``stl_const``.
+
+    ``boolean_abstract`` is a snapshot taken after building, for the
+    "retain full model execution" side of the reconstruction: the base checker's
+    ``model_abstract_const`` re-imposes EVERY entry of ``model.boolean_abstract``
+    (all ODE integrals and continuous invariants), which is what keeps the model
+    ``forall_t`` complete and avoids the base checker's guard-drop witness bug.
+    """
+
+    bound: int
+    tau_max: float
+    delta: float
+    sub_formulas: set
+    #: chi(1, 1, stl_formula): the initial STL choice the base checker seeds the
+    #: scenario solver with, and the base of the accumulated target.
+    initial_stl_f: Formula
+    initial_model_f: Formula
+    initial_track_const: Formula
+    #: Per-bound model consts, index = bound, 0..``bound`` (non-final k_model_f).
+    model_consts: list
+    model_track_consts: list
+    #: model.k_step_consts(bound, is_final=True): the final segment's model consts.
+    model_f_k_final: Formula
+    model_track_f_k_final: Formula
+    #: Per-bound accumulated STL goal / timing definitions, index = bound.
+    stl_consts: list
+    stl_time_consts: list
+    #: STL final condition at depth 2*bound+2 (the last depth's `final`).
+    final_f_k: Formula
+    #: time_ordering(2*bound+2, tau_max).
+    time_order_const: Formula
+    #: Snapshot of model.boolean_abstract after building all bounds 0..``bound``.
+    boolean_abstract: dict = field(default_factory=dict)
 
 
 class Encoder:
@@ -96,14 +175,100 @@ class Encoder:
         else:
             contradiction = BoolVal("True")
 
-        skeleton = And([model_const, contradiction, stl_const])
-        consts = And([skeleton, ba_consts])
+        consts = And([model_const, contradiction, stl_const, ba_consts])
         return Encoding(
             consts=consts,
-            skeleton=skeleton,
             boolean_abstract=boolean_abstract,
             bound=bound,
             range_dict=self.model.range_dict,
+        )
+
+    def enumerate_components_at(self, bound: int) -> StlComponents:
+        """Expose the base checker's un-collapsed STL + model components at ``bound``.
+
+        This reproduces the state ``EnumerateAlgorithm.run`` holds when it calls
+        ``scenario_check`` for ``bound`` (``encoding/enumerate.py``), by calling
+        the SAME per-depth builders (``model.k_step_consts``,
+        ``k_depth_stl_consts``, ``time_ordering``, ``calc_sub_formulas``,
+        ``chi``). Nothing is collapsed into a monolithic ``stl_const`` and no
+        full-Bool ``path2const`` is run, so the caller keeps the freedom to
+        minimize against the recursive falsification target first and reconstruct
+        the property path from the CORE only.
+
+        Side effect: like the base checker's ``run`` (which does
+        ``model.boolean_abstract.clear()`` before its bound loop), this clears and
+        repopulates ``model.boolean_abstract`` for bounds 0..``bound``. It is
+        therefore an ALTERNATIVE encode path to ``encode_at`` on the same
+        ``Encoder`` -- pick one per pivot; do not interleave their model state.
+        The returned ``boolean_abstract`` is a snapshot, so the caller's
+        ``model_abstract_const`` is stable even if the model is later reset.
+        """
+        model = self.model
+        # Match EnumerateAlgorithm.run: a clean abstraction map, STL condition on.
+        model.boolean_abstract.clear()
+        model.gen_stl_condition()
+
+        # Same falsification target the base checker derives (enumerate.py:80-90).
+        raw_stl_formula = substitution(self.goal.get_formula(), self.prop_dict)
+        neg_formula = reduce_not(Not(raw_stl_formula))
+        reduced_formula = remove_binary(neg_formula)
+        stl_formula = relaxing(reduced_formula, self.delta)
+        sub_formulas = calc_sub_formulas(stl_formula)
+        initial_stl_f = chi(1, 1, stl_formula)
+
+        initial_model_f, initial_track_const = model.init_consts()
+
+        model_consts: list[Formula] = []
+        model_track_consts: list[Formula] = []
+        stl_consts: list[Formula] = []
+        stl_time_consts: list[Formula] = []
+        final_f_k: Formula | None = None
+        time_order_const: Formula | None = None
+        model_f_k_final: Formula | None = None
+        model_track_f_k_final: Formula | None = None
+
+        for b in range(0, int(bound) + 1):
+            # Model consts: the non-final k_model_f and the final one, exactly as
+            # run does (enumerate.py:118-121). Both mutate boolean_abstract; the
+            # keys are per (module, bound) so re-assignment is idempotent.
+            model_f_k, track_f_k = model.k_step_consts(b)
+            model_f_k_final, model_track_f_k_final = model.k_step_consts(
+                b, is_final=True)
+            model_consts.append(model_f_k)
+            model_track_consts.append(track_f_k)
+
+            # STL goal / timing definitions accumulated over the two depths of
+            # bound b (enumerate.py:130-145). final_f_k is the last depth's final.
+            stl_children: list[Formula] = []
+            time_children: list[Formula] = []
+            for d in range(2 * b + 1, 2 * b + 3):
+                stl_f_d, time_f_d, final_f_d = k_depth_stl_consts(
+                    sub_formulas, d, self.tau_max)
+                stl_children.append(stl_f_d)
+                time_children.append(time_f_d)
+                final_f_k = final_f_d
+            time_order_const = time_ordering(2 * b + 2, self.tau_max)
+            stl_consts.append(And(stl_children))
+            stl_time_consts.append(And(time_children))
+
+        assert final_f_k is not None and time_order_const is not None
+        return StlComponents(
+            bound=int(bound),
+            tau_max=self.tau_max,
+            delta=self.delta,
+            sub_formulas=sub_formulas,
+            initial_stl_f=initial_stl_f,
+            initial_model_f=initial_model_f,
+            initial_track_const=initial_track_const,
+            model_consts=model_consts,
+            model_track_consts=model_track_consts,
+            model_f_k_final=model_f_k_final,
+            model_track_f_k_final=model_track_f_k_final,
+            stl_consts=stl_consts,
+            stl_time_consts=stl_time_consts,
+            final_f_k=final_f_k,
+            time_order_const=time_order_const,
+            boolean_abstract=dict(model.boolean_abstract),
         )
 
     def reset(self) -> None:
