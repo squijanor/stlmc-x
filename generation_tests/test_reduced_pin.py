@@ -88,6 +88,33 @@ def test_target_scales_with_bound():
     assert "MODELFINAL" in s1 and "MODELFINAL" in s3
 
 
+def test_model_execution_is_the_complete_model_not_the_abstraction():
+    """The reduced query retains the COMPLETE model execution -- the initial
+    condition, every non-final step's model consts, and the final step's -- so a
+    jump guard or reset dropped from the property core cannot let a witness
+    satisfy the reduced property along a trajectory the automaton cannot produce.
+    The abstraction map alone (boolean_abstract) only DEFINES the ODE-integral
+    and invariant Bools; it asserts no guard or reset, which is what let the
+    minimizer produce guard-violating witnesses before this was retained whole."""
+    me = str(_reduced(bound=2)._model_execution)
+    # init + every step's model consts (guards, resets, flows live here)
+    for marker in ("INIT_MODEL", "MODELNEXT_0", "MODELNEXT_1", "MODELFINAL"):
+        assert marker in me, marker
+    # the property / timing subformulas are NOT part of the model execution:
+    # those are the only thing the reduction is allowed to drop.
+    for absent in ("STL_0", "STL_1", "STLFINAL", "STLTIME_0", "TIMEORDER"):
+        assert absent not in me, absent
+
+
+def test_the_model_execution_scales_with_bound():
+    """Every non-final step 0..N-1 plus the final step is kept, so no step's
+    guards or resets are missing at a deeper bound."""
+    me1 = str(_reduced(bound=1)._model_execution)
+    me3 = str(_reduced(bound=3)._model_execution)
+    assert "MODELNEXT_2" not in me1 and "MODELNEXT_2" in me3
+    assert "MODELFINAL" in me1 and "MODELFINAL" in me3
+
+
 # --------------------------------------------------------------------------- #
 #  2. candidate-loop behaviour (scripted pivot search + scripted candidate oracle)
 # --------------------------------------------------------------------------- #
