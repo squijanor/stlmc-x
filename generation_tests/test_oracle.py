@@ -278,3 +278,50 @@ class TestDrealSolverArgs:
         solver.set_precision(None)
         assert solver._solver_args("dReal", "q.smt2") == [
             "dReal", "q.smt2", "--short_sat", "--model"]
+
+    def test_a_solver_that_was_not_given_ode_settings_omits_them(self):
+        """The ODE flags default off, like the delta: the base checker builds
+        its command line through this same method and must be unaffected."""
+        solver = self._solver()
+        assert solver._solver_args("dReal", "q.smt2") == [
+            "dReal", "q.smt2", "--short_sat", "--model"]
+
+    def test_configured_ode_settings_reach_the_binary(self):
+        solver = self._solver()
+        solver.set_ode_settings(5, 0.01)
+        assert solver._solver_args("dReal", "q.smt2") == [
+            "dReal", "q.smt2", "--short_sat", "--model",
+            "--ode-order", "5", "--ode-step", "0.01"]
+
+    def test_each_ode_flag_is_emitted_independently(self):
+        solver = self._solver()
+        solver.set_ode_settings(5, None)
+        assert solver._solver_args("dReal", "q.smt2") == [
+            "dReal", "q.smt2", "--short_sat", "--model", "--ode-order", "5"]
+        solver.set_ode_settings(None, 0.02)
+        assert solver._solver_args("dReal", "q.smt2") == [
+            "dReal", "q.smt2", "--short_sat", "--model", "--ode-step", "0.02"]
+
+    def test_the_ode_step_is_rendered_as_a_decimal(self):
+        """dReal3's parser has no p/q literal, so the step must reach the
+        command line as a decimal, never as a rational."""
+        solver = self._solver()
+        solver.set_ode_settings(5, Fraction(1, 100))
+        args = solver._solver_args("dReal", "q.smt2")
+        assert "--ode-step" in args
+        assert "1/100" not in args
+
+    def test_ode_settings_compose_with_the_delta(self):
+        solver = self._solver()
+        solver.set_precision(Fraction(1, 1000))
+        solver.set_ode_settings(5, 0.01)
+        assert solver._solver_args("dReal", "q.smt2") == [
+            "dReal", "q.smt2", "--short_sat", "--model", "--precision", "0.001",
+            "--ode-order", "5", "--ode-step", "0.01"]
+
+    def test_ode_settings_can_be_cleared(self):
+        solver = self._solver()
+        solver.set_ode_settings(5, 0.01)
+        solver.set_ode_settings(None, None)
+        assert solver._solver_args("dReal", "q.smt2") == [
+            "dReal", "q.smt2", "--short_sat", "--model"]

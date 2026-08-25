@@ -107,23 +107,45 @@ class dRealSolver(ParallelSMTSolver):
         # own default. Callers that do not set it get the command line this
         # solver has always issued.
         self._precision = None
+        # dReal's ODE integration order and step, or None to leave each at the
+        # binary's own default. Set explicitly by a caller, for the same reason
+        # as the delta above: an arm that has not asked for one keeps the
+        # command line it had.
+        self._ode_order = None
+        self._ode_step = None
 
     def set_precision(self, precision):
         """Run the binary at ``precision`` rather than at its own default.
 
-        The [dreal] section is read by this class for the ODE settings and the
-        executable path, but the delta was never passed on, so a configured
-        value described the run without reaching it. It is set explicitly
-        rather than read from the section here, because a caller that has not
-        asked for a delta must keep the command line it had.
+        The [dreal] section is read by this class for the executable path, but
+        the delta was never passed on, so a configured value described the run
+        without reaching it. It is set explicitly rather than read from the
+        section here, because a caller that has not asked for a delta must keep
+        the command line it had.
         """
         self._precision = None if precision is None else float(precision)
+
+    def set_ode_settings(self, order, step):
+        """Run the binary at ``order`` / ``step`` rather than at its defaults.
+
+        The ODE integration order and step have the same history as the delta
+        (see :meth:`set_precision`): the [dreal] values were read but never
+        placed on the command line, so a configured order or step described a
+        run it did not reach. ``None`` for either leaves that flag off, so a
+        caller that has not asked for one keeps the command line it had.
+        """
+        self._ode_order = None if order is None else int(order)
+        self._ode_step = None if step is None else float(step)
 
     def _solver_args(self, exec_path, model_file_name):
         """The binary's command line for one query."""
         args = [exec_path, model_file_name, "--short_sat", "--model"]
         if self._precision is not None:
             args += ["--precision", repr(self._precision)]
+        if self._ode_order is not None:
+            args += ["--ode-order", str(self._ode_order)]
+        if self._ode_step is not None:
+            args += ["--ode-step", repr(self._ode_step)]
         return args
 
     def set_logic(self, logic_name: str):
@@ -320,8 +342,6 @@ class dRealSolver(ParallelSMTSolver):
     def process(self, main_queue: Queue, sema: threading.Semaphore, const):
         dreal_section = self.config.get_section("dreal")
         common_section = self.config.get_section("common")
-        ode_step = dreal_section.get_value("ode-step")
-        ode_order = dreal_section.get_value("ode-order")
         time_horizon = common_section.get_value("time-horizon")
         time_bound = common_section.get_value("time-bound")
         exec_path = dreal_section.get_value("executable-path")
@@ -413,8 +433,6 @@ class dRealSolver(ParallelSMTSolver):
         logger = self.logger
         dreal_section = self.config.get_section("dreal")
         common_section = self.config.get_section("common")
-        ode_step = dreal_section.get_value("ode-step")
-        ode_order = dreal_section.get_value("ode-order")
         time_horizon = common_section.get_value("time-horizon")
         time_bound = common_section.get_value("time-bound")
         exec_path = dreal_section.get_value("executable-path")
