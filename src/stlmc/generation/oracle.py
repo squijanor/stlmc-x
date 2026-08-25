@@ -356,8 +356,8 @@ class DrealReSolveOracle(GrowthOracle):
         solver.set_precision(self.tolerance)
         # The ODE integration order/step reach the binary from here for the
         # same reason as the delta above: [dreal] ode-order / ode-step were
-        # read but never placed on the command line. "auto" or an absent key
-        # leaves dReal at its own default.
+        # read but never placed on the command line. An absent key, reported as
+        # auto, leaves dReal at its own default.
         solver.set_ode_settings(*ode_settings(self._config))
         if self._logger is not None:
             solver.append_logger(self._logger)
