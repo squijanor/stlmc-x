@@ -108,6 +108,7 @@ from .common import (
     gen_int,
     gen_present,
     gen_str,
+    ode_settings,
     resolve_seed,
     scoped_verdict,
     validate_gen,
@@ -1392,6 +1393,12 @@ class RegionBoxDiscovery(Algorithm):
                 f"[kappa_box] backend precision="
                 f"{float(backend_precision(config, underlying))} "
                 f"per solver call ([dreal] precision)")
+            order, step = ode_settings(config)
+            printer.print_normal(
+                f"[kappa_box] dReal ODE integration: "
+                f"order={'auto' if order is None else order}, "
+                f"step={'auto' if step is None else step} "
+                f"([dreal] ode-order / ode-step)")
 
         encoder = Encoder(model, goal, prop_dict, delta, tau_max)
         pool: list[dict[Variable, Constant]] = []
