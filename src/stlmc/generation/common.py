@@ -384,6 +384,46 @@ def backend_precision(config, solver: str) -> Fraction:
     return value
 
 
+def ode_settings(config) -> tuple[int | None, float | None]:
+    """The dReal ODE integration flags to emit, as ``(order, step)``.
+
+    Read here alongside :func:`backend_precision` so a configured value reaches
+    the command line rather than only describing the run. ``[dreal] ode-order``
+    and ``ode-step`` are mandatory floats in the configuration, so both are
+    normally present and are passed straight through; only a genuinely absent
+    section or key (a caller that built its own configuration) leaves the flag
+    off. A present value must be positive: a zero or negative integration
+    setting has no reading. ``order`` is dReal's Taylor order (a whole number);
+    ``step`` is the integration step size.
+    """
+    return (_ode_setting(config, "ode-order", integral=True),
+            _ode_setting(config, "ode-step", integral=False))
+
+
+def _ode_setting(config, key: str, *, integral: bool):
+    if config is None or not config.is_section_in("dreal"):
+        return None
+    section = config.get_section("dreal")
+    if not section.is_argument_in(key):
+        return None
+    raw = str(section.get_value(key)).strip().strip('"')
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(f'[dreal] {key} = "{raw}" is not a number') from exc
+    if value != value or value in (float("inf"), float("-inf")) or value <= 0:
+        raise ValueError(
+            f"[dreal] {key} = {raw} must be a positive number; it is a dReal "
+            "ODE integration setting")
+    if integral:
+        if value != int(value):
+            raise ValueError(
+                f"[dreal] {key} = {raw} must be a whole number (dReal's Taylor "
+                "order)")
+        return int(value)
+    return value
+
+
 def resolve_seed(config, printer=None) -> int:
     """The generation seed: -gen-seed if given (>= 0), else PYTHONHASHSEED.
 

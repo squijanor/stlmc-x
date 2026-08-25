@@ -15,6 +15,7 @@ import pytest
 from stlmc.generation.common import (
     DEFAULT_BACKEND_PRECISION,
     backend_precision,
+    ode_settings,
     validate_gen,
     z3_logic,
 )
@@ -129,6 +130,38 @@ class TestBackendPrecision:
         did not happen."""
         with pytest.raises(ValueError, match="precision"):
             backend_precision(config_with_dreal(precision=value), "dreal")
+
+
+class TestOdeSettings:
+    """`[dreal] ode-order` / `ode-step` are resolved here so a configured value
+    reaches the command line instead of only describing the run. They are
+    mandatory floats in the configuration, so both are normally present; only a
+    genuinely absent section or key leaves the flag off, and a present value
+    must be a positive number (the order a whole one)."""
+
+    def test_an_absent_section_or_key_leaves_the_flag_off(self):
+        assert ode_settings(None) == (None, None)
+        assert ode_settings(Configuration()) == (None, None)
+        assert ode_settings(config_with_dreal(precision="0.001")) == (None, None)
+
+    def test_configured_values_resolve(self):
+        assert ode_settings(config_with_dreal(ode_order="5",
+                                              ode_step="0.01")) == (5, 0.01)
+
+    def test_each_setting_is_independent(self):
+        assert ode_settings(config_with_dreal(ode_order="5")) == (5, None)
+        assert ode_settings(config_with_dreal(ode_step="0.02")) == (None, 0.02)
+
+    @pytest.mark.parametrize("value", ["0", "-1", "off", "abc", "nan", "inf"])
+    def test_a_non_positive_or_non_number_step_is_an_error(self, value):
+        with pytest.raises(ValueError, match="ode-step"):
+            ode_settings(config_with_dreal(ode_step=value))
+
+    def test_a_fractional_order_is_an_error(self):
+        """dReal's Taylor order is a whole number; 5.5 is a configuration
+        mistake, not a silent truncation to 5."""
+        with pytest.raises(ValueError, match="ode-order"):
+            ode_settings(config_with_dreal(ode_order="5.5"))
 
 
 def config_with_z3(**values):
