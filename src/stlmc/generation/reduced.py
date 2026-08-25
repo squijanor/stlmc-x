@@ -116,6 +116,23 @@ class ReducedPivotSearch:
                         components.time_order_const])
         self.stl_final = components.final_f_k
 
+        # The COMPLETE model execution: the initial condition, every non-final
+        # step's model consts (flows, invariants, jump guards and resets, mode
+        # transitions) and the final step's model consts. This is retained in
+        # full in every reconstructed query. The abstraction map alone
+        # (``boolean_abstract``) only DEFINES the ODE-integral and invariant
+        # Bools; it does not assert the initial condition or the guards and
+        # resets that make a trajectory a run of the automaton. Those live in the
+        # model consts, and the minimizer is free to drop the ones the property
+        # core does not need -- which lets dReal satisfy the reduced query with a
+        # trajectory that jumps without meeting a guard. Keeping the model
+        # execution whole closes that: the reduced query drops only NON-core
+        # PROPERTY subformulas, never a model constraint.
+        self._model_execution = And(
+            [components.initial_model_f]
+            + [components.model_consts[b] for b in range(N)]
+            + [components.model_f_k_final])
+
         # Flattened recursive falsification target F (see module docstring).
         self._not_F = Not(And([init_conj] + nexts + [n_path_N]))
 
@@ -157,14 +174,21 @@ class ReducedPivotSearch:
     def last_verdict(self) -> str | None:
         return self._last_verdict
 
-    def next(self):
-        """Next reduced pivot, or ``None`` when the structure space is exhausted
-        or the scenario solve gives up.
+    def propose(self):
+        """Next reduced pivot as ``(total_const, path_const, assn)`` WITHOUT
+        blocking it, or ``None`` when the structure space is exhausted, the
+        scenario solve gives up, or the minimizer cannot decide the core.
+        :meth:`last_verdict` distinguishes the three: UNSAT (spent) from UNKNOWN
+        (either the scenario solver or the minimizer gave up).
 
-        Returns ``(total_const, path_const, assn)``: ``total_const`` is the reduced
-        dReal query, ``path_const`` its z3 twin (block ``Not(path_const)`` on the
-        candidate oracle), ``assn`` the scenario assignment. The found structure is
-        blocked internally so a subsequent call yields a different one.
+        ``total_const`` is the reduced dReal query, ``path_const`` its z3 twin,
+        ``assn`` the scenario assignment. The proposal is NOT blocked, so a caller
+        MUST install a block that excludes at least the returned structure before
+        the following call, or the same structure recurs. :meth:`next` blocks the
+        whole reduced path; a caller that verifies a narrower query (e.g. one that
+        pins the location word on top of ``total_const``) must block a
+        correspondingly narrower region, or it would drop untested structures that
+        merely share this reduced path.
         """
         r = self._scenario.check()
         if r == z3.sat:
@@ -178,7 +202,30 @@ class ReducedPivotSearch:
 
         m = self._scenario.model()
         assn = Z3Assignment(m).get_assignments()
-        total_const, path_const = self._reconstruct(m, assn)
+        out = self._reconstruct(m, assn)
+        if out is None:
+            # The minimizer could not decide the core within its bound. An unsat
+            # core read after an `unknown` check can be empty, and an empty core
+            # reconstructs path_const = True, whose negation makes the scenario
+            # search UNSAT -- a false exhaustion. Report it as UNKNOWN instead.
+            self._last_verdict = UNKNOWN
+            return None
+        total_const, path_const = out
+        return total_const, path_const, assn
+
+    def next(self):
+        """Next reduced pivot, blocking it STRUCTURE-WIDE so a subsequent call
+        yields a different reduced path, or ``None`` when the search is spent.
+
+        This is the enumerator for a caller that verifies exactly the reduced
+        query (kappa_box's Alg.-2 pivot search): it adds no per-word restriction,
+        so excluding the whole reduced path is the right generalization. A
+        word-aware caller uses :meth:`propose` and installs its own block.
+        """
+        out = self.propose()
+        if out is None:
+            return None
+        total_const, path_const, assn = out
         # Generalize: block this structure (enumerate.py:326-327) so next() moves on.
         self._scenario.add(z3Obj(Not(path_const)))
         return total_const, path_const, assn
@@ -225,7 +272,23 @@ class ReducedPivotSearch:
                 else:
                     s.add(z3Obj(Eq(c, false_)))
 
-        s.check()
+        r = s.check()
+        if r == z3.unknown:
+            # The minimizer hit its bound. The unsat core read now can be empty
+            # or partial; an empty core reconstructs path_const = True and its
+            # negation would collapse the scenario search. Signal
+            # reduction-unknown to the caller (which leaves the search unresolved)
+            # rather than returning a degenerate path.
+            return None
+        if r == z3.sat:
+            # Not(F) is satisfiable together with the candidate's literals: the
+            # candidate structure does not force the falsification target. That
+            # contradicts how the scenario solver selected it, so the
+            # reconstruction would be meaningless -- fail loudly instead of
+            # pooling a witness for an unforced target.
+            raise RuntimeError(
+                "reduced-query minimizer: the candidate did not force the "
+                "falsification target (Not(F) is satisfiable under it)")
         cores = {str(x) for x in s.unsat_core()}
         p_reals = cores.difference(true_bool_ids)
         p_bools = cores.difference(p_reals)
@@ -236,7 +299,9 @@ class ReducedPivotSearch:
         path_real_consts = [real_dict[p] for p in p_reals if p in real_dict]
         path_const = And(list(path_bool_consts) + list(path_real_consts))
 
-        # Full model execution: EVERY abstraction (ODE integrals + invariants).
+        # The abstraction map: DEFINES every ODE-integral and invariant Bool as
+        # its formula. It is what the integral/invariant forall_t attach to, but
+        # on its own it asserts no initial condition, guard or reset.
         model_abstract_const = And(
             [Eq(v, self.boolean_abstract[v]) for v in self.boolean_abstract])
         # Reduced property path: only the core-selected forall_t. (enumerate.py:295-298)
@@ -248,7 +313,12 @@ class ReducedPivotSearch:
         range_const = And(
             [self.model.make_range_consts(d)[0] for d in range(0, self.N + 1)])
 
+        # The reduced query drops only NON-core property subformulas. The full
+        # model execution is retained in whole (self._model_execution) so the
+        # witness is a genuine automaton run -- init, flow, invariants, guards
+        # and resets are all present -- rather than a trajectory that merely
+        # satisfies the surviving property path.
         total_const = And([path_const, extra_prop_path_const, self.stl_final,
                            extra_time_path_const, range_const,
-                           model_abstract_const])
+                           model_abstract_const, self._model_execution])
         return total_const, path_const
