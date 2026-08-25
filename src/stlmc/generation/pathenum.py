@@ -73,6 +73,7 @@ from .common import (
     gen_depths,
     gen_float,
     gen_int,
+    ode_settings,
     resolve_seed,
     scoped_verdict,
     validate_gen,
@@ -316,6 +317,12 @@ class DiscretePathEnum(Algorithm):
                 f"[kappa_path] backend precision="
                 f"{float(backend_precision(config, underlying))} "
                 f"per solver call ([dreal] precision)")
+            order, step = ode_settings(config)
+            printer.print_normal(
+                f"[kappa_path] dReal ODE integration: "
+                f"order={'auto' if order is None else order}, "
+                f"step={'auto' if step is None else step} "
+                f"([dreal] ode-order / ode-step)")
 
         encoder = Encoder(model, goal, prop_dict, delta, tau_max)
 
