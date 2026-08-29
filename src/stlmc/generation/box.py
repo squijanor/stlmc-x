@@ -116,6 +116,7 @@ from .common import (
     z3_logic,
 )
 from .encode import Encoder
+from .feasibility import LinearWordFeasibilityFilter
 from .oracle import (
     SAT,
     UNKNOWN,
@@ -711,6 +712,12 @@ class RegionBoxDiscovery(Algorithm):
         printer = self._printer
         self._pivot_giveup = None
         rp = self._reduced_pivot_search(encoding, encoder, seed)
+        model = getattr(rp, "model", None)
+        feasibility = (
+            LinearWordFeasibilityFilter(
+                model, rp.tau_max, getattr(self, "_time_horizon", None),
+                cache=getattr(self, "_feasibility_cache", None))
+            if model is not None else None)
         # kappa_box's IC region blocks bind the pivot search (Alg. 2): a pivot
         # must fall outside every already-grown box.
         for block in blocks:
@@ -750,6 +757,21 @@ class RegionBoxDiscovery(Algorithm):
                 for v, c in sorted(
                     ((v, c) for v, c in assn.items() if MODE_RE.match(v.id)),
                     key=lambda kv: int(MODE_RE.match(kv[0].id).group(1))))
+
+            # Skip the backend for a word with no run; block the whole word.
+            mode_items = sorted(
+                ((v, c) for v, c in assn.items() if MODE_RE.match(v.id)),
+                key=lambda kv: int(MODE_RE.match(kv[0].id).group(1)))
+            mode_seq = [int(round(float(c.value))) for _, c in mode_items]
+            if (feasibility is not None and mode_seq
+                    and feasibility.word_is_infeasible(len(mode_seq) - 1, mode_seq)):
+                if attempt == 1 or attempt % every == 0:
+                    printer.print_verbose(
+                        "[kappa_box/two-step] reduced candidate {} (word {}): "
+                        "infeasible on the linear timeline -- skipped".format(
+                            attempt, word or "-"))
+                rp.add_block(Not(And([Eq(v, c) for v, c in mode_items])))
+                continue
 
             d = self._candidate_oracle(logic, seed)
             d.set_budget(min(candidate_bound,
@@ -1294,6 +1316,7 @@ class RegionBoxDiscovery(Algorithm):
         _th = common.get_value("time-horizon") if common.is_argument_in(
             "time-horizon") else "time-bound"
         self._time_horizon = float(tau_max) if str(_th) == "time-bound" else float(_th)
+        self._feasibility_cache = {}
         self._config = config
         self._logger = logger
         self._tau_max = common.get_value("time-bound")
