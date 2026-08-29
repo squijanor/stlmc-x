@@ -159,6 +159,7 @@ class StlMC(Model):
     def make_flow_consts(self, bound):
         integral_children = list()
         integral_object_list = list()
+        linear_children = list()
         substitute_dict = dict()
         op_dict = {'bool': Bool, 'int': Int, 'real': Real}
 
@@ -187,17 +188,20 @@ class StlMC(Model):
                     if len(get_vars(cur_flow)) == 0:
                         constant_consts.append(
                             Eq(end_vector[cur_ode], start_vector[cur_ode] + cur_flow * Real("time_" + str(bound))))
-                        if bound == 0:
-                            constant_consts.append(Eq(Real("time_0"), Real("tau_0")))
-                        else:
-                            constant_consts.append(Eq(Real("time_" + str(bound)),
-                                                      (Real("tau_" + str(bound + 1)) - Real("tau_" + str(bound)))))
+                        constant_consts.append(
+                            Eq(Real("time_" + str(bound)),
+                               Real("tau_" + str(bound + 1)) - Real("tau_" + str(bound))))
             integral = Integral(module_index, end_vector, start_vector, new_dynamics)
             bool_integral = Bool("newIntegral_" + str(module_index) + "_" + str(bound))
             self.boolean_abstract[bool_integral] = integral
             integral_object_list.append(integral)
             integral_children.append(bool_integral)
-        return integral_children, integral_object_list
+
+            if constant_consts:
+                linear_children.append(And(constant_consts))
+            else:
+                linear_children.append(And([BoolVal("True")]))
+        return integral_children, integral_object_list, linear_children
 
     def make_invariant_consts(self, bound, integrals):
         track_dict = dict()
@@ -321,8 +325,8 @@ class StlMC(Model):
     def get_flow_for_assignment(self, bound):
         flows = list()
         for k in range(bound + 1):
-            flow_consts = self.make_flow_consts(k)
-            flows.append(flow_consts.children)
+            flow_consts, _, _ = self.make_flow_consts(k)
+            flows.append(flow_consts)
         return flows
 
     def make_consts(self, bound):
@@ -367,7 +371,7 @@ class StlMC(Model):
         mode_consts, mode_track_dict = self.make_mode_consts(k)
         track_dict.update(mode_track_dict)
 
-        flow_consts, integral_object_list = self.make_flow_consts(k)
+        flow_consts, integral_object_list, linear_consts = self.make_flow_consts(k)
         inv_consts, inv_track_dict = self.make_invariant_consts(k, integral_object_list)
         track_dict.update(inv_track_dict)
         if is_final:
@@ -381,6 +385,7 @@ class StlMC(Model):
             sub_result = list()
             sub_result.append(mode_consts[module_index])
             sub_result.append(flow_consts[module_index])
+            sub_result.append(linear_consts[module_index])
             sub_result.append(inv_consts[module_index])
             if jump_consts is not None:
                 sub_result.append(jump_consts[module_index])
