@@ -10,7 +10,7 @@ from ..objects.algorithm import *
 from ..objects.configuration import Configuration
 from ..objects.goal import Goal, ReachGoal
 from ..objects.model import Model
-from ..solver.dreal import dRealSolver, DrealAssignment
+from ..solver.dreal import dRealSolver, DrealAssignment, DEFAULT_QUERY_BUDGET
 from ..solver.z3 import *
 from ..util.logger import Logger
 from ..util.print import Printer
@@ -50,13 +50,26 @@ class EnumerateAlgorithm(Algorithm):
         parallel = common_section.get_value("parallel")
         core = int(common_section.get_value("parallel-core"))
 
+        # A dReal query gets a per-call wall-clock ceiling so a non-terminating
+        # nonlinear query cannot stall the checker; other backends decide on
+        # their own. solver-timeout, when set, bounds the whole check.
+        query_budget = DEFAULT_QUERY_BUDGET if isinstance(solver, dRealSolver) else None
+        total_budget = resolve_solver_timeout(config)
+
         if self.runner is None:
             if parallel == "true":
-                self.runner = ParallelAlgRunner(core)
+                self.runner = ParallelAlgRunner(core, query_budget=query_budget)
             else:
-                self.runner = NormalRunner()
+                self.runner = NormalRunner(query_budget=query_budget)
 
         assert self.runner is not None
+
+        self.runner.query_budget = query_budget
+        self.runner.saw_unknown = False
+        self.runner.timed_out = False
+        deadline = (time.monotonic() + total_budget
+                    if total_budget is not None else None)
+        self.runner.deadline = deadline
 
         self.clear()
 
@@ -164,7 +177,8 @@ class EnumerateAlgorithm(Algorithm):
             result, result_model, scenario_time = self.scenario_check(model, b, tau_max, sub_formulas,
                                                                       model_consts, stl_consts, stl_time_consts,
                                                                       model_f_k_final, final_f_k, time_order_const,
-                                                                      solver)
+                                                                      solver,
+                                                                      deadline=deadline)
 
             finished_bound = b
             total_size = acc_size(model_consts)
@@ -188,15 +202,24 @@ class EnumerateAlgorithm(Algorithm):
                     printer.print_verbose("total loop : {}".format(self.runner.number))
                     printer.print_verbose("size : {}".format(total_size))
                     return "False", self.runner.time, finished_bound, runner_model.get_assignments()
+
+            if deadline is not None and time.monotonic() > deadline:
+                self.runner.timed_out = True
+                break
         printer.print_verbose("total loop : {}".format(self.runner.number))
         printer.print_verbose("size : {}".format(total_size))
+        # A timed-out query or an exhausted total budget leaves a word neither
+        # refuted nor witnessed, so absence is not established.
+        if self.runner.timed_out or self.runner.saw_unknown:
+            self.runner.kill_all()
+            return "Unknown", total_time, finished_bound, None
         return "True", total_time, finished_bound, None
 
     # accumulated
     def scenario_check(self, model: Model, bound: int, tau_max, sub_formulas: Set[Formula],
                        acc_model: List[Formula], acc_stl: List[Formula], acc_stl_time: List[Formula],
                        model_f_k_final: Formula, stl_final: Formula, stl_time_order: Formula,
-                       smt_solver: SMTSolver, is_generalized=True):
+                       smt_solver: SMTSolver, deadline=None, is_generalized=True):
         total_time = 0.0
         print("bound: {}".format(bound))
 
@@ -236,6 +259,9 @@ class EnumerateAlgorithm(Algorithm):
         false = BoolVal("False")
         counter = 0
         while True:
+            if deadline is not None and time.monotonic() > deadline:
+                self.runner.timed_out = True
+                break
             scenario_s = time.time()
             result = self.scenario_solver.check()
             scenario_e = time.time()
@@ -388,6 +414,31 @@ class EnumerateAlgorithm(Algorithm):
 
         print("# bound: {}, {}".format(bound, counter))
         return False, None, self.runner.time
+
+
+def resolve_solver_timeout(config):
+    """Seconds for the whole check, or None when the total budget is off.
+
+    ``[common] solver-timeout`` sets it; absent, or ``0`` / ``off`` / ``none``,
+    leaves the check unbounded, in which case only the per-query ceiling binds.
+    """
+    common = config.get_section("common")
+    if not common.is_argument_in("solver-timeout"):
+        return None
+    raw = str(common.get_value("solver-timeout")).strip()
+    if raw in ("", "0", "off", "none"):
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ValueError(
+            '[common] solver-timeout = "{}": a number of seconds is required '
+            '(0, "off" or "none" disables the total budget)'.format(raw)) from None
+    if value != value or value in (float("inf"), float("-inf")) or value < 0:
+        raise ValueError(
+            '[common] solver-timeout = "{}": a finite number of seconds >= 0 '
+            'is required (0, "off" or "none" disables the total budget)'.format(raw))
+    return value
 
 
 def k_depth_stl_consts(sub_formulas: Set[Formula], depth: int, tau_max: float) -> Tuple[Formula, Formula, Formula]:
