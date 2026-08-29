@@ -69,6 +69,17 @@ class EnumerateAlgorithm(Algorithm):
 
         # depth = int(bound) * 2
         tau_max = float(time_bound)
+        # Local import avoids an import cycle with the generation package.
+        from ..generation.feasibility import LinearWordFeasibilityFilter
+        # The per-step dwell cap is enforced only in the dReal query, so pass
+        # it only when the backend is dReal; otherwise leave it unbounded.
+        if str(common_section.get_value("solver")) == "dreal":
+            _th = (common_section.get_value("time-horizon")
+                   if common_section.is_argument_in("time-horizon") else "time-bound")
+            time_horizon = tau_max if str(_th) == "time-bound" else float(_th)
+        else:
+            time_horizon = None
+        self._feasibility = LinearWordFeasibilityFilter(model, tau_max, time_horizon)
 
         is_reach = isinstance(goal, ReachGoal)
         if is_reach:
@@ -331,6 +342,22 @@ class EnumerateAlgorithm(Algorithm):
                         total_const = And([path_const, extra_prop_path_const, stl_final,
                                            extra_time_path_const, range_const,
                                            model_abstract_const, model_execution])
+
+                    # Skip the backend for a word with no run; block the whole word.
+                    _mode_seq = []
+                    for _k in range(bound + 1):
+                        _mv = assn_dict.get(Real("currentMode_" + str(_k)))
+                        if _mv is None:
+                            _mode_seq = None
+                            break
+                        _mode_seq.append(int(round(float(_mv.value))))
+                    if (_mode_seq is not None
+                            and self._feasibility.word_is_infeasible(bound, _mode_seq)):
+                        self.scenario_solver.add(z3Obj(Not(And(
+                            [Eq(Real("currentMode_" + str(_k)), RealVal(str(_m)))
+                             for _k, _m in enumerate(_mode_seq)]))))
+                        counter += 1
+                        continue
 
                     if not self.loop_mode:
                         self.runner.set_debug(self.debug_name)
