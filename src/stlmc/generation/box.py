@@ -76,9 +76,11 @@ for the driver to append to the payload.
 
 from __future__ import annotations
 
+import os
 import re
 import time as _time
 from collections import Counter as _Counter
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from fractions import Fraction
 
 from ..constraints.constraints import (
@@ -688,6 +690,33 @@ class RegionBoxDiscovery(Algorithm):
         return ReducedPivotSearch(components, encoder.model, seed=seed,
                                   timeout_ms=timeout_ms)
 
+    def _verify_workers(self) -> int:
+        """Candidate-verification pool size. A pool only when ``[common]``
+        parallel is enabled. A dReal ODE check has a large memory footprint, so
+        running one per core oversubscribes memory and every solve thrashes.
+
+        ``[common]`` parallel-core is read as a request: a value from 1 up to the
+        core count is honored as-is, at the user's own risk (it may exceed the
+        memory-safe default). A value above the core count -- the generous
+        configuration default -- is not a real request for that many workers, so
+        it resolves to a memory-safe fraction of the cores: a quarter when the
+        count is a multiple of four, half otherwise. That way an ordinary run is
+        never oversubscribed without the user asking, while a user who has
+        profiled a model can set an explicit count (higher for an exhaustion-
+        heavy property, lower for falsification). Disabled, absent or unreadable
+        gives 1, which verifies one at a time in the calling thread."""
+        try:
+            common = self._config.get_section("common")
+            if str(common.get_value("parallel")) != "true":
+                return 1
+            core = int(common.get_value("parallel-core"))
+        except (AttributeError, KeyError, TypeError, ValueError):
+            return 1
+        cpus = os.cpu_count() or core
+        if 1 <= core <= cpus:
+            return core
+        return max(1, cpus // 4 if cpus % 4 == 0 else cpus // 2)
+
     def _pivot_two_step(self, encoding, logic, seed, blocks, encoder=None):
         """Two-step delta pivot on the base checker's reduced query.
 
@@ -704,6 +733,18 @@ class RegionBoxDiscovery(Algorithm):
         transcribes ``scenario_check``), and the full model execution is retained
         so no jump guard is dropped (the base checker's guard-drop witness bug is
         avoided).
+
+        Proposal stays sequential: the scenario search is stateful and each
+        returned structure is blocked so the next differs. The per-candidate
+        dReal check is fanned out across a pool sized by ``[common]``
+        parallel-core; each check is its own subprocess, so threads carry it.
+        This thread proposes and screens (all z3) and keeps a bounded window of
+        checks in flight, harvesting finished ones so proposal overlaps the
+        running checks and a slow candidate does not idle the pool. Results
+        commit in proposal order, so the earliest-proposed satisfiable candidate
+        is accepted regardless of completion order and only the proposals up to
+        it count: the accepted pivot, its oracle and the per-depth accounting
+        match a one-at-a-time search, and the window only removes idle time.
 
         Returns ``(oracle, model, encoding)`` for a falsifying pivot outside
         every block, else ``(None, None, None)`` with ``_last_pivot_verdict`` /
@@ -730,55 +771,33 @@ class RegionBoxDiscovery(Algorithm):
         candidate_bound = gen_float(self._config, "pivot-timeout")
         if candidate_bound is None:
             candidate_bound = _DEFAULT_CANDIDATE_TIMEOUT
+        workers = self._verify_workers()
 
         printer.print_normal(
             "[kappa_box/two-step] dReal gets the base-checker REDUCED query "
             "(core-selected property forall_t + full model execution), not "
             "consts; refuted structures blocked structure-wide")
 
-        started = _time.monotonic()
-        deadline = started + budget
-        attempt, refuted, undecided_seconds = 0, 0, 0.0
-        while _time.monotonic() < deadline:
-            attempt += 1
-            self._metrics["candidates"] += 1
-            res = rp.next()
-            if res is None:
-                # UNSAT exhausts the structure space; UNKNOWN means the scenario
-                # solver gave up within its bound -- kept apart, as the skeleton
-                # path keeps them, so a resource failure is never reported as
-                # "no more boxes".
-                self._last_pivot_verdict = (
-                    UNSAT if rp.last_verdict() == UNSAT else UNKNOWN)
-                return None, None, None
-            total_const, path_const, assn = res
-            word = ".".join(
-                str(int(round(float(c.value))))
-                for v, c in sorted(
-                    ((v, c) for v, c in assn.items() if MODE_RE.match(v.id)),
-                    key=lambda kv: int(MODE_RE.match(kv[0].id).group(1))))
+        def _word_of(mode_items):
+            return ".".join(
+                str(int(round(float(c.value)))) for _, c in mode_items)
 
-            # Skip the backend for a word with no run; block the whole word.
-            mode_items = sorted(
-                ((v, c) for v, c in assn.items() if MODE_RE.match(v.id)),
-                key=lambda kv: int(MODE_RE.match(kv[0].id).group(1)))
-            mode_seq = [int(round(float(c.value))) for _, c in mode_items]
-            if (feasibility is not None and mode_seq
-                    and feasibility.word_is_infeasible(len(mode_seq) - 1, mode_seq)):
-                if attempt == 1 or attempt % every == 0:
-                    printer.print_verbose(
-                        "[kappa_box/two-step] reduced candidate {} (word {}): "
-                        "infeasible on the linear timeline -- skipped".format(
-                            attempt, word or "-"))
-                rp.add_block(Not(And([Eq(v, c) for v, c in mode_items])))
-                continue
-
+        def _verify(cand):
+            # One candidate on its own oracle and subprocess. The budget is read
+            # here, when the worker actually starts -- not when the candidate was
+            # queued -- so a candidate that waited in the pool behind draining
+            # probes still respects what is left of the pivot budget. None left:
+            # return UNKNOWN without starting dReal. The clamp also makes the
+            # oracle take the budgeted process() path, which does not touch the
+            # shared logger, so the pool shares config and logger by read.
+            remaining = deadline - _time.monotonic()
+            if remaining <= 0:
+                return UNKNOWN, None, 0.0
             d = self._candidate_oracle(logic, seed)
-            d.set_budget(min(candidate_bound,
-                             max(deadline - _time.monotonic(), 0.1)))
-            d.assert_(total_const)
+            d.set_budget(min(candidate_bound, remaining))
+            d.assert_(cand["total_const"])
             # Blocks bind the pivot, never growth: a popped frame, mirroring
-            # _pivot_two_step and _pivot_at.
+            # _pivot_at.
             if blocks:
                 d.push()
                 for block in blocks:
@@ -787,34 +806,184 @@ class RegionBoxDiscovery(Algorithm):
             v = d.check()
             _el = _time.monotonic() - _t0
             d.set_budget("unset")
-            if v != UNSAT or attempt % every == 0 or attempt == 1:
+            return v, (d if v == SAT else None), _el
+
+        def _propose_next():
+            """The next distinct structure in proposal order. Returns
+            ``("job", idx, word, total_const)`` for a feasible candidate to
+            verify, ``("skip", idx, word)`` for one the linear screen pruned (and
+            blocked word-wide), or ``("end", verdict)`` once the space is spent
+            (UNSAT exhausted, UNKNOWN the scenario solver gave up -- kept apart so
+            a resource failure is never reported as "no more boxes"). All z3 --
+            the scenario search and the screen -- runs here, on the single thread
+            that calls this; the workers only run dReal."""
+            nonlocal next_idx
+            res = rp.next()
+            if res is None:
+                return ("end", UNSAT if rp.last_verdict() == UNSAT else UNKNOWN)
+            next_idx += 1
+            idx = next_idx
+            # next() blocks the returned structure structure-wide, so the next
+            # proposal differs -- the reservation that keeps candidates distinct.
+            total_const, path_const, assn = res
+            mode_items = sorted(
+                ((v, c) for v, c in assn.items() if MODE_RE.match(v.id)),
+                key=lambda kv: int(MODE_RE.match(kv[0].id).group(1)))
+            mode_seq = [int(round(float(c.value))) for _, c in mode_items]
+            word = _word_of(mode_items)
+            if (feasibility is not None and mode_seq
+                    and feasibility.word_is_infeasible(
+                        len(mode_seq) - 1, mode_seq)):
+                if idx == 1 or idx % every == 0:
+                    printer.print_verbose(
+                        "[kappa_box/two-step] reduced candidate {} (word {}): "
+                        "infeasible on the linear timeline -- skipped".format(
+                            idx, word or "-"))
+                rp.add_block(Not(And([Eq(v, c) for v, c in mode_items])))
+                return ("skip", idx, word)
+            return ("job", idx, word, total_const)
+
+        def _log_verdict(idx, word, v, el):
+            if v != UNSAT or idx % every == 0 or idx == 1:
                 printer.print_verbose(
                     "[kappa_box/two-step] reduced candidate {} (word {}): dreal "
-                    "says {} ({:.1f}s)".format(attempt, word or "-", v, _el))
-            if v == SAT:
-                self._metrics["accepted"] += 1
-                model = d.model()  # before pop(): pop clears the model state
-                if blocks:
-                    d.pop()
-                return d, model, encoding
-            # rp already blocked this structure (Not(path_const)); a refutation
-            # rules out the whole structure under every property decomposition,
-            # so the block is structure-wide, matching the free mode.
-            if v == UNSAT:
-                refuted += 1
-            else:
-                undecided_seconds += _el
-                self._undecided_candidates += 1
+                    "says {} ({:.1f}s)".format(idx, word or "-", v, el))
 
-        elapsed = _time.monotonic() - started
-        self._pivot_giveup = _binding_bound(
-            attempt, refuted, 0, undecided_seconds, elapsed)
-        printer.print_normal(
-            f"[kappa_box/two-step] reduced: gave up after {attempt} "
-            f"candidates: {refuted} refuted, {undecided_seconds:.0f}s "
-            f"undecided at [gen] pivot-timeout={candidate_bound}s")
-        self._last_pivot_verdict = UNKNOWN
-        return None, None, None
+        def _accept(oracle):
+            self._metrics["accepted"] += 1
+            model = oracle.model()  # before pop(): pop clears the model state
+            if blocks:
+                oracle.pop()
+            return oracle, model, encoding
+
+        def _giveup(refuted, undecided_seconds):
+            elapsed = _time.monotonic() - started
+            self._pivot_giveup = _binding_bound(
+                next_idx, refuted, 0, undecided_seconds, elapsed)
+            printer.print_normal(
+                f"[kappa_box/two-step] reduced: gave up after {next_idx} "
+                f"candidates: {refuted} refuted, {undecided_seconds:.0f}s "
+                f"undecided at [gen] pivot-timeout={candidate_bound}s")
+            self._last_pivot_verdict = UNKNOWN
+            return None, None, None
+
+        def _sequential():
+            # parallel-core = 1 (or parallel off): one candidate at a time, no
+            # pool -- the one-at-a-time search the parallel path reproduces.
+            refuted, undecided_seconds = 0, 0.0
+            while _time.monotonic() < deadline:
+                item = _propose_next()
+                if item[0] == "end":
+                    self._last_pivot_verdict = item[1]
+                    return None, None, None
+                self._metrics["candidates"] += 1
+                if item[0] == "skip":
+                    continue
+                _, idx, word, total_const = item
+                v, oracle, el = _verify({"total_const": total_const})
+                _log_verdict(idx, word, v, el)
+                if v == SAT:
+                    return _accept(oracle)
+                if v == UNSAT:
+                    refuted += 1
+                else:
+                    undecided_seconds += el
+                    self._undecided_candidates += 1
+            return _giveup(refuted, undecided_seconds)
+
+        def _pipeline(pool):
+            # A bounded producer/consumer window. This thread proposes and
+            # screens (all z3) and submits feasible candidates to `pool`, keeping
+            # up to `window` in flight so a slow in-order commit does not starve
+            # the workers; a finished check is harvested out to free a slot, so
+            # proposal keeps overlapping the running checks. Results commit in
+            # proposal order, so every counter and the accepted pivot match the
+            # one-at-a-time search -- the window only removes idle time. Twice the
+            # worker count keeps the pool saturated while a commit waits.
+            window = 2 * workers
+            refuted, undecided_seconds = 0, 0.0
+            inflight = {}   # idx -> (word, future): submitted, not yet harvested
+            ready = {}      # idx -> outcome tuple, awaiting in-order commit
+            spent = None    # exhaustion verdict once the space is spent
+            commit = 1      # next idx to commit
+            while True:
+                # Refill: overlap proposal/screen with the running checks.
+                while (spent is None and len(inflight) < window
+                       and _time.monotonic() < deadline):
+                    item = _propose_next()
+                    if item[0] == "end":
+                        spent = item[1]
+                    elif item[0] == "skip":
+                        ready[item[1]] = ("skip", item[2])
+                    else:
+                        _, idx, word, total_const = item
+                        inflight[idx] = (word, pool.submit(
+                            _verify, {"total_const": total_const}))
+                # Harvest finished checks, freeing window slots.
+                for idx in [i for i, (w, f) in inflight.items() if f.done()]:
+                    word, fut = inflight.pop(idx)
+                    v, oracle, el = fut.result()
+                    ready[idx] = ("job", word, v, oracle, el)
+                # Commit in proposal order.
+                while commit in ready:
+                    out = ready.pop(commit)
+                    self._metrics["candidates"] += 1
+                    if out[0] == "job":
+                        _, word, v, oracle, el = out
+                        _log_verdict(commit, word, v, el)
+                        if v == SAT:
+                            for _w, f in inflight.values():
+                                f.cancel()
+                            return _accept(oracle)
+                        if v == UNSAT:
+                            refuted += 1
+                        else:
+                            undecided_seconds += el
+                            self._undecided_candidates += 1
+                    commit += 1
+                if not inflight and (spent is not None
+                                     or _time.monotonic() >= deadline):
+                    if spent is not None:
+                        self._last_pivot_verdict = spent
+                        return None, None, None
+                    return _giveup(refuted, undecided_seconds)
+                can_refill = (spent is None and len(inflight) < window
+                              and _time.monotonic() < deadline)
+                if inflight and not can_refill:
+                    # Full window (or spent / past the deadline) and the next in
+                    # order is still running or queued: wait for a check to
+                    # finish, but no longer than the pivot budget -- a future
+                    # queued behind older draining checks must not hold this
+                    # pivot past its own deadline.
+                    done, _ = wait(
+                        [f for _w, f in inflight.values()],
+                        timeout=max(0.0, deadline - _time.monotonic()),
+                        return_when=FIRST_COMPLETED)
+                    if not done and _time.monotonic() >= deadline:
+                        # The budget elapsed with nothing finishing: the pending
+                        # futures are queued behind older work and would only
+                        # return the immediate UNKNOWN once a worker frees.
+                        # Cancel this pivot's queued work and give up; anything
+                        # already running drains under its own clamp.
+                        for _w, f in inflight.values():
+                            f.cancel()
+                        return _giveup(refuted, undecided_seconds)
+
+        started = _time.monotonic()
+        deadline = started + budget
+        next_idx = 0
+
+        if workers == 1:
+            return _sequential()
+        shared = getattr(self, "_verify_pool", None)
+        if shared is not None:
+            # The run-scoped pool: reused across searches, not shut down here, so
+            # its threads cap outstanding checks at parallel-core.
+            return _pipeline(shared)
+        # No run-scoped pool (a direct call): a pool for this search, context-
+        # managed so it is not leaked.
+        with ThreadPoolExecutor(max_workers=workers) as local:
+            return _pipeline(local)
 
     def _pivot_at(
         self,
@@ -1434,179 +1603,200 @@ class RegionBoxDiscovery(Algorithm):
         # that was skipped (or exhausted under a heuristic) ground a True.
         settled: set[int] = set()
 
-        for depth in target_depths:
-            blocks: list[Formula] = []  # per depth: independent region discovery
-            boxes_here = 0
-            # The witnesses admitted at this depth, and the scope of both
-            # admission rules below. theta is the pool's minimum separation, and
-            # a depth is where that has to hold: growth runs unmasked, so a
-            # later box may regrow across an earlier one and place a lattice
-            # centre arbitrarily close to a witness the earlier box contributed.
-            # Across depths the opposite holds -- one initial condition
-            # falsifying at several depths is the depth axis, not redundancy --
-            # so neither rule reaches beyond the depth it is applied in.
-            depth_pool: list[dict[Variable, Constant]] = []
-            # depth_pool and pool are appended in lockstep from here, so index
-            # i of the former is index depth_offset + i of the latter -- which
-            # is what lets a marker relabel an entry an earlier box contributed.
-            depth_offset = len(pool)
-            # Both caveats on an exhaustion claim are scoped to a depth, since
-            # the structure space and its blocks are -- and so is the metrics
-            # line, which is printed under a per-depth label and previously
-            # accumulated over the whole run.
-            self._rotated_words = 0
-            self._undecided_candidates = 0
-            self._metrics = _Counter()
-            while per_depth_boxes is None or boxes_here < per_depth_boxes:
-                oracle, pivot, encoding = self._pivot_at(
-                    encoder, depth, logic, seed, blocks
-                )
-                if pivot is None:
-                    if getattr(self, "_last_pivot_verdict", None) == UNKNOWN:
-                        self._any_unresolved = True
-                        # Name the bound that actually bit. `pivot-timeout` and
-                        # `pivot-budget` are read by the two-step search alone,
-                        # so on the exact backend -- one query, no candidate
-                        # loop -- neither is the knob: `query-timeout` is.
-                        if self._pivot_giveup is None:
-                            key, why = ("query-timeout",
-                                        "the pivot query was left undecided")
-                        else:
-                            key, why = self._pivot_giveup
-                        printer.print_normal(
-                            f"[kappa_box] depth {depth}: pivot search UNRESOLVED "
-                            f"({why}) -- the region is NOT proven empty; raise "
-                            f"[gen] {key} to search further")
-                    else:
-                        # UNSAT: the structure space is exhausted. What that is
-                        # worth depends on what left it. Two things remove
-                        # candidates the oracle never refuted: word rotation
-                        # blocks structures outright, and a candidate that
-                        # expired undecided is blocked so the search can make
-                        # progress, on no evidence about it. Under either,
-                        # exhaustion means no further structure was reachable,
-                        # not that none exists.
-                        heuristic, remedies = [], []
-                        if self._rotated_words:
-                            heuristic.append(
-                                f"{self._rotated_words} word(s) rotated off")
-                            remedies.append("word-rotate = 0")
-                        if self._undecided_candidates:
-                            heuristic.append(
-                                f"{self._undecided_candidates} candidate(s) "
-                                "blocked undecided")
-                            remedies.append("a larger [gen] pivot-timeout")
-                        scope = ("no counterexample at this depth"
-                                 if not blocks else
-                                 f"no counterexample outside the "
-                                 f"{boxes_here} box(es) already found")
-                        if heuristic:
-                            # An exhaustion a heuristic took part in does not
-                            # settle the depth: candidates were removed that no
-                            # oracle refuted (Def. of the pruning policy), so
-                            # the verdict must not read this depth as decided.
+        # One verification pool for the whole discovery, so outstanding
+        # candidate checks stay globally capped at parallel-core across searches:
+        # a search that accepts early leaves its later probes draining in this
+        # pool, and the next search's batch queues behind them rather than adding
+        # a fresh pool on top. Only the delta two-step verifies candidates in a
+        # pool; the exact path is a single query, so it takes no pool. None when
+        # a pool of one would serve (serial).
+        self._verify_pool = (
+            ThreadPoolExecutor(max_workers=self._verify_workers())
+            if underlying != "z3" and self._verify_workers() > 1 else None)
+
+        try:
+            for depth in target_depths:
+                blocks: list[Formula] = []  # per depth: independent region discovery
+                boxes_here = 0
+                # The witnesses admitted at this depth, and the scope of both
+                # admission rules below. theta is the pool's minimum separation, and
+                # a depth is where that has to hold: growth runs unmasked, so a
+                # later box may regrow across an earlier one and place a lattice
+                # centre arbitrarily close to a witness the earlier box contributed.
+                # Across depths the opposite holds -- one initial condition
+                # falsifying at several depths is the depth axis, not redundancy --
+                # so neither rule reaches beyond the depth it is applied in.
+                depth_pool: list[dict[Variable, Constant]] = []
+                # depth_pool and pool are appended in lockstep from here, so index
+                # i of the former is index depth_offset + i of the latter -- which
+                # is what lets a marker relabel an entry an earlier box contributed.
+                depth_offset = len(pool)
+                # Both caveats on an exhaustion claim are scoped to a depth, since
+                # the structure space and its blocks are -- and so is the metrics
+                # line, which is printed under a per-depth label and previously
+                # accumulated over the whole run.
+                self._rotated_words = 0
+                self._undecided_candidates = 0
+                self._metrics = _Counter()
+                while per_depth_boxes is None or boxes_here < per_depth_boxes:
+                    oracle, pivot, encoding = self._pivot_at(
+                        encoder, depth, logic, seed, blocks
+                    )
+                    if pivot is None:
+                        if getattr(self, "_last_pivot_verdict", None) == UNKNOWN:
                             self._any_unresolved = True
+                            # Name the bound that actually bit. `pivot-timeout` and
+                            # `pivot-budget` are read by the two-step search alone,
+                            # so on the exact backend -- one query, no candidate
+                            # loop -- neither is the knob: `query-timeout` is.
+                            if self._pivot_giveup is None:
+                                key, why = ("query-timeout",
+                                            "the pivot query was left undecided")
+                            else:
+                                key, why = self._pivot_giveup
                             printer.print_normal(
-                                "[kappa_box] depth {}: structure space exhausted, "
-                                "but not every candidate was refuted ({}) -- "
-                                "absence is NOT established; re-run with {} to "
-                                "make it conclusive".format(
-                                    depth, ", ".join(heuristic),
-                                    " and ".join(remedies)))
+                                f"[kappa_box] depth {depth}: pivot search UNRESOLVED "
+                                f"({why}) -- the region is NOT proven empty; raise "
+                                f"[gen] {key} to search further")
                         else:
-                            settled.add(depth)
-                            printer.print_normal(
-                                f"[kappa_box] depth {depth}: structure space "
-                                f"exhausted -- {scope} (absence, established by "
-                                f"exhaustion)")
-                    encoder.reset()
-                    break
+                            # UNSAT: the structure space is exhausted. What that is
+                            # worth depends on what left it. Two things remove
+                            # candidates the oracle never refuted: word rotation
+                            # blocks structures outright, and a candidate that
+                            # expired undecided is blocked so the search can make
+                            # progress, on no evidence about it. Under either,
+                            # exhaustion means no further structure was reachable,
+                            # not that none exists.
+                            heuristic, remedies = [], []
+                            if self._rotated_words:
+                                heuristic.append(
+                                    f"{self._rotated_words} word(s) rotated off")
+                                remedies.append("word-rotate = 0")
+                            if self._undecided_candidates:
+                                heuristic.append(
+                                    f"{self._undecided_candidates} candidate(s) "
+                                    "blocked undecided")
+                                remedies.append("a larger [gen] pivot-timeout")
+                            scope = ("no counterexample at this depth"
+                                     if not blocks else
+                                     f"no counterexample outside the "
+                                     f"{boxes_here} box(es) already found")
+                            if heuristic:
+                                # An exhaustion a heuristic took part in does not
+                                # settle the depth: candidates were removed that no
+                                # oracle refuted (Def. of the pruning policy), so
+                                # the verdict must not read this depth as decided.
+                                self._any_unresolved = True
+                                printer.print_normal(
+                                    "[kappa_box] depth {}: structure space exhausted, "
+                                    "but not every candidate was refuted ({}) -- "
+                                    "absence is NOT established; re-run with {} to "
+                                    "make it conclusive".format(
+                                        depth, ", ".join(heuristic),
+                                        " and ".join(remedies)))
+                            else:
+                                settled.add(depth)
+                                printer.print_normal(
+                                    f"[kappa_box] depth {depth}: structure space "
+                                    f"exhausted -- {scope} (absence, established by "
+                                    f"exhaustion)")
+                        encoder.reset()
+                        break
 
-                oracle.assert_(_skeleton_fix(pivot))  # pin path + Boolean skeleton
-                k_witness = gen_int(config, "k-witness")
-                witnesses, box_labels, box = self._grow_box(
-                    oracle, pivot, encoding, theta, bisect_iters, depth,
-                    _DEFAULT_K_WITNESS if k_witness is None else k_witness,
-                    printer, axis_ids, ic_edges, domain_label
-                )
-                boxes_here += 1
-                total_boxes += 1
-                if total_boxes == 1:
-                    first_depth = depth
+                    oracle.assert_(_skeleton_fix(pivot))  # pin path + Boolean skeleton
+                    k_witness = gen_int(config, "k-witness")
+                    witnesses, box_labels, box = self._grow_box(
+                        oracle, pivot, encoding, theta, bisect_iters, depth,
+                        _DEFAULT_K_WITNESS if k_witness is None else k_witness,
+                        printer, axis_ids, ic_edges, domain_label
+                    )
+                    boxes_here += 1
+                    total_boxes += 1
+                    if total_boxes == 1:
+                        first_depth = depth
 
-                kept = 0
-                collapsed_across = 0
-                merged_across = 0
-                # Earlier boxes at this depth only. _grow_box already applies
-                # both admission rules within a box, so checking against a
-                # snapshot rather than the live list leaves the single-box case
-                # exactly as it was and adds only the cross-box half.
-                prior_here = list(depth_pool)
-                tol_of = self._tol_of
-                for witness, label in zip(witnesses, box_labels):
-                    if label == _DEEP:
-                        # Separation: a deep witness within theta of one an
-                        # earlier box at this depth contributed carries nothing
-                        # the pool does not already have.
-                        if _within_theta(witness, prior_here, box.keys(), theta):
-                            collapsed_across += 1
-                            continue
-                        if thin > 0 and _too_close(
-                            witness, depth_pool, box.keys(), thin
-                        ):
-                            continue
-                    else:
-                        # One entry per initial condition: a marker landing on a
-                        # witness an earlier box already contributed relabels it
-                        # rather than adding a second entry for the same point.
-                        # Markers are exempt from separation, not from this --
-                        # two boxes at one depth can converge on the same face,
-                        # and without the check the pool carries the same
-                        # initial condition twice, at distance zero on every
-                        # axis the metrics measure.
-                        hit = _coincides_with(
-                            witness, prior_here, box.keys(), tol_of)
-                        if hit is not None:
-                            merged_across += 1
-                            at = depth_offset + hit
-                            labels[at] = _prefer_label(labels[at], label)
-                            continue
-                    depth_pool.append(witness)
-                    pool.append(witness)
-                    labels.append(label)
-                    kept += 1
-                if collapsed_across:
+                    kept = 0
+                    collapsed_across = 0
+                    merged_across = 0
+                    # Earlier boxes at this depth only. _grow_box already applies
+                    # both admission rules within a box, so checking against a
+                    # snapshot rather than the live list leaves the single-box case
+                    # exactly as it was and adds only the cross-box half.
+                    prior_here = list(depth_pool)
+                    tol_of = self._tol_of
+                    for witness, label in zip(witnesses, box_labels):
+                        if label == _DEEP:
+                            # Separation: a deep witness within theta of one an
+                            # earlier box at this depth contributed carries nothing
+                            # the pool does not already have.
+                            if _within_theta(witness, prior_here, box.keys(), theta):
+                                collapsed_across += 1
+                                continue
+                            if thin > 0 and _too_close(
+                                witness, depth_pool, box.keys(), thin
+                            ):
+                                continue
+                        else:
+                            # One entry per initial condition: a marker landing on a
+                            # witness an earlier box already contributed relabels it
+                            # rather than adding a second entry for the same point.
+                            # Markers are exempt from separation, not from this --
+                            # two boxes at one depth can converge on the same face,
+                            # and without the check the pool carries the same
+                            # initial condition twice, at distance zero on every
+                            # axis the metrics measure.
+                            hit = _coincides_with(
+                                witness, prior_here, box.keys(), tol_of)
+                            if hit is not None:
+                                merged_across += 1
+                                at = depth_offset + hit
+                                labels[at] = _prefer_label(labels[at], label)
+                                continue
+                        depth_pool.append(witness)
+                        pool.append(witness)
+                        labels.append(label)
+                        kept += 1
+                    if collapsed_across:
+                        printer.print_verbose(
+                            f"[kappa_box] {collapsed_across} deep witness(es) of "
+                            f"this box landed within theta of a witness an earlier "
+                            f"box at depth {depth} contributed and were dropped")
+                    if merged_across:
+                        printer.print_verbose(
+                            f"[kappa_box] {merged_across} marker(s) coincided with a "
+                            f"witness an earlier box at depth {depth} contributed "
+                            f"and were merged into it")
+
+                    # Block the envelope: the box extended by theta on every face.
+                    # This is a coverage heuristic, not an exact exclusion of a
+                    # falsifying region -- the envelope is a search-and-harvest
+                    # rectangle, not a subset of the falsifying set, so it can also
+                    # exclude falsifying initial conditions it bridges. A re-pivot
+                    # must escape the envelope on some axis and is not guaranteed to
+                    # recover a disconnected component as a separate box.
+                    block_bounds = {v: (lo - theta.of(v), hi + theta.of(v))
+                                    for v, (lo, hi) in box.items()}
+                    blocks.append(_block_box(block_bounds, oracle.rv))
+                    encoder.reset()  # clean slate before the next pivot search
+                    printer.print_normal(
+                        "[kappa_box/metrics] depth {}: candidates={} accepted={} "
+                        "accept-rate={:.0%}".format(
+                            depth,
+                            self._metrics["candidates"],
+                            self._metrics["accepted"],
+                            (self._metrics["accepted"] / self._metrics["candidates"])
+                            if self._metrics["candidates"] else 0.0))
                     printer.print_verbose(
-                        f"[kappa_box] {collapsed_across} deep witness(es) of "
-                        f"this box landed within theta of a witness an earlier "
-                        f"box at depth {depth} contributed and were dropped")
-                if merged_across:
-                    printer.print_verbose(
-                        f"[kappa_box] {merged_across} marker(s) coincided with a "
-                        f"witness an earlier box at depth {depth} contributed "
-                        f"and were merged into it")
+                        f"[kappa_box] depth {depth}: box {boxes_here} here, "
+                        f"kept {kept}/{len(witnesses)}; pool {len(pool)}"
+                    )
 
-                # Block the envelope: the box extended by theta on every face.
-                # This is a coverage heuristic, not an exact exclusion of a
-                # falsifying region -- the envelope is a search-and-harvest
-                # rectangle, not a subset of the falsifying set, so it can also
-                # exclude falsifying initial conditions it bridges. A re-pivot
-                # must escape the envelope on some axis and is not guaranteed to
-                # recover a disconnected component as a separate box.
-                block_bounds = {v: (lo - theta.of(v), hi + theta.of(v))
-                                for v, (lo, hi) in box.items()}
-                blocks.append(_block_box(block_bounds, oracle.rv))
-                encoder.reset()  # clean slate before the next pivot search
-                printer.print_normal(
-                    "[kappa_box/metrics] depth {}: candidates={} accepted={} "
-                    "accept-rate={:.0%}".format(
-                        depth, self._metrics["candidates"], self._metrics["accepted"],
-                        (self._metrics["accepted"] / self._metrics["candidates"])
-                        if self._metrics["candidates"] else 0.0))
-                printer.print_verbose(
-                    f"[kappa_box] depth {depth}: box {boxes_here} here, "
-                    f"kept {kept}/{len(witnesses)}; pool {len(pool)}"
-                )
+        finally:
+            # Release the pool on every path, so a failure in proposal, dReal
+            # setup or a check does not leave it attached with live threads.
+            if self._verify_pool is not None:
+                self._verify_pool.shutdown(wait=False)
+                self._verify_pool = None
 
         self.ce_labels = labels
         printer.print_verbose(
