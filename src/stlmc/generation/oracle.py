@@ -41,6 +41,7 @@ root ``stlmc``.
 from __future__ import annotations
 
 import abc
+import itertools
 import os
 from fractions import Fraction
 from typing import Dict, Tuple
@@ -326,7 +327,9 @@ class DrealReSolveOracle(GrowthOracle):
 
     is_exact = False
     timeouts = 0
-    _smt2_seq = 0
+    # Monotonic across every oracle. next() on it is a single atomic step, so
+    # concurrent checks draw distinct SMT2 subdirectory tokens.
+    _smt2_counter = itertools.count(1)
 
     @property
     def tolerance(self) -> Fraction:
@@ -387,8 +390,8 @@ class DrealReSolveOracle(GrowthOracle):
         # diagnosis. The token is strategy-neutral: this oracle serves every
         # generation strategy, and a diagnosis session should not find a
         # kappa_path run's queries filed under the sibling's name.
-        DrealReSolveOracle._smt2_seq += 1
-        token = f"gen_{os.getpid()}_{DrealReSolveOracle._smt2_seq}"
+        seq = next(DrealReSolveOracle._smt2_counter)
+        token = f"gen_{os.getpid()}_{seq}"
         solver.set_file_name(token)
         try:
             keep = str(self._config.get_section("gen").get_value("keep-smt2")) == "1"
