@@ -17,6 +17,12 @@ from ..solver.assignment import Assignment
 from ..tree.operations import size_of_tree
 from ..util.logger import Logger
 
+# Wall-clock ceiling for one base-checker dReal subprocess. A call that has not
+# returned by this bound is killed and its query reported Unknown, so a
+# non-terminating nonlinear query cannot stall the checker. A ceiling, not a
+# tuning value: set well above the time a decidable query takes.
+DEFAULT_QUERY_BUDGET = 300.0
+
 
 class DrealAssignment(Assignment):
     def __init__(self, _dreal_model):
@@ -113,6 +119,14 @@ class dRealSolver(ParallelSMTSolver):
         # command line it had.
         self._ode_order = None
         self._ode_step = None
+        # Per-query wall-clock budget for the serial solve path, or None to
+        # leave the call unbounded. Only the base checker sets it; a caller that
+        # has not asked for a budget keeps the unbounded behaviour it had.
+        self._query_budget = None
+
+    def set_query_budget(self, seconds):
+        """Bound each serial dReal call to ``seconds`` (None leaves it unbounded)."""
+        self._query_budget = None if seconds is None else float(seconds)
 
     def set_precision(self, precision):
         """Run the binary at ``precision`` rather than at its own default.
@@ -476,7 +490,24 @@ class dRealSolver(ParallelSMTSolver):
 
         logger.reset_timer()
         logger.start_timer("solving timer")
-        stdout, stderr = await proc.communicate()
+        if self._query_budget is None:
+            stdout, stderr = await proc.communicate()
+        else:
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=self._query_budget)
+            except asyncio.TimeoutError:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                await proc.wait()
+                logger.stop_timer("solving timer")
+                elapsed = logger.get_duration_time("solving timer")
+                self.set_time("solving timer", elapsed)
+                if os.path.isfile(model_file_name):
+                    os.remove(model_file_name)
+                return "Unknown", None
         logger.stop_timer("solving timer")
         self.set_time("solving timer", logger.get_duration_time("solving timer"))
         stdout_str = stdout.decode()[len("Solution:\n"):-1]
