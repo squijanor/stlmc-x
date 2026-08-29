@@ -385,5 +385,5 @@ def test_the_reduced_query_carries_guards_and_resets_on_a_real_model():
     assert me in str(total_const)
     # ... and it carries the real jump guards and a reset equality
     assert ">= 0.9" in me   # branch guard  x >= 0.9
-    assert ">= 2.0" in me   # Arrived guard x >= 2.0
+    assert ">= 4.4" in me   # Arrived guard x >= 4.4
     assert "(x_1_0 = x_0_t)" in me   # a reset  x' = x across the first jump
