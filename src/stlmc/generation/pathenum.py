@@ -81,6 +81,7 @@ from .common import (
     z3_logic,
 )
 from .encode import Encoder
+from .feasibility import LinearWordFeasibilityFilter
 from .oracle import SAT, UNKNOWN, UNSAT, fix_modes, make_oracle, query_timeout
 from .reduced import ReducedPivotSearch
 
@@ -257,6 +258,9 @@ class DiscretePathEnum(Algorithm):
         tau_max = float(common.get_value("time-bound"))
         delta = float(common.get_value("threshold"))
         underlying = common.get_value("solver")
+        _th = (common.get_value("time-horizon")
+               if common.is_argument_in("time-horizon") else "time-bound")
+        self._time_horizon = tau_max if str(_th) == "time-bound" else float(_th)
 
         # Fail fast on malformed [gen] values, before any solver work, so a
         # typo dies as a configuration error naming the key rather than as a
@@ -510,6 +514,8 @@ class DiscretePathEnum(Algorithm):
         unresolved = False
         first_depth = max_depth
         decided: list[int] = []
+        feasibility = LinearWordFeasibilityFilter(
+            encoder.model, tau_max, getattr(self, "_time_horizon", None))
 
         qsec = query_timeout(config)
         timeout_ms = None if qsec is None else max(1, int(qsec * 1000))
@@ -603,6 +609,17 @@ class DiscretePathEnum(Algorithm):
                 # (this reduced path AND this word), leaving the path available to
                 # a sibling word.
                 pair_block = Not(And([path_const, word_pin]))
+
+                # Skip the backend for a word with no run; block the whole word.
+                mode_seq = [int(round(float(val.value))) for _, val in word]
+                if feasibility.word_is_infeasible(depth, mode_seq):
+                    if candidates == 1 or candidates % every == 0:
+                        printer.print_verbose(
+                            f"[kappa_path] depth {depth}: candidate {candidates} "
+                            f"(word {word_str}) infeasible on the linear timeline "
+                            "-- skipped")
+                    search.add_block(Not(word_pin))
+                    continue
 
                 # Verify the structure on dReal via the reduced query, pinning the
                 # word so the delta-sat witness spells exactly this structure's
