@@ -47,7 +47,10 @@ alone does not pin it.
 
 from __future__ import annotations
 
+import os
+import threading
 import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from functools import reduce
 from typing import NamedTuple
 
@@ -97,6 +100,40 @@ _LOG_EVERY_DEFAULT = 25
 # per-candidate floor: the last call under a tight [gen] pivot-budget still gets
 # a real, if short, attempt rather than a zero-length one.
 _MIN_CALL_BUDGET = 0.1
+
+# Outstanding-check window as a multiple of the worker count on the parallel
+# delta path: the proposing thread keeps up to this many dReal checks in flight
+# so a slow in-order commit does not idle the pool.
+_WINDOW_FACTOR = 2
+
+
+class _LiveVerifiers:
+    """The verifiers whose dReal check is in flight, so the proposing thread can
+    kill them when it stops a depth or ends the run rather than leave the pool
+    blocked until each per-call budget expires (Future.cancel does not stop a
+    running check). Thread-safe: workers add and discard, the proposing thread
+    terminates."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._live: set = set()
+
+    def add(self, verifier) -> None:
+        with self._lock:
+            self._live.add(verifier)
+
+    def discard(self, verifier) -> None:
+        with self._lock:
+            self._live.discard(verifier)
+
+    def terminate_all(self) -> None:
+        with self._lock:
+            live = list(self._live)
+        for verifier in live:
+            try:
+                verifier.terminate()
+            except Exception:
+                pass
 
 
 class PathBlock(NamedTuple):
@@ -471,6 +508,31 @@ class DiscretePathEnum(Algorithm):
         # it is the shallowest depth that yielded one, not the bound searched.
         return result, 0.0, first_depth, pool
 
+    def _path_verify_workers(self, config) -> int:
+        """Candidate-verification pool size for the delta path. A pool only when
+        ``[common]`` parallel is enabled. A dReal ODE check has a large memory
+        footprint, so running one per core oversubscribes memory and every solve
+        thrashes.
+
+        ``[common]`` parallel-core is read as a request: a value from 1 up to the
+        core count is honored as-is, at the user's own risk (it may exceed the
+        memory-safe default). A value above the core count -- the generous
+        configuration default -- resolves to a memory-safe fraction of the cores:
+        a quarter when the count is a multiple of four, half otherwise. Disabled,
+        absent or unreadable gives 1, which verifies one at a time in the calling
+        thread."""
+        try:
+            common = config.get_section("common")
+            if str(common.get_value("parallel")) != "true":
+                return 1
+            core = int(common.get_value("parallel-core"))
+        except (AttributeError, KeyError, TypeError, ValueError):
+            return 1
+        cpus = os.cpu_count() or core
+        if 1 <= core <= cpus:
+            return core
+        return max(1, cpus // 4 if cpus % 4 == 0 else cpus // 2)
+
     def _run_reduced(self, encoder, target_depths, per_depth, radius, seed,
                      logic, config, logger, printer, max_depth, tau_max):
         """Delta path: enumerate falsifying words on the base checker's reduced
@@ -489,18 +551,31 @@ class DiscretePathEnum(Algorithm):
                    different word (word-level de-duplication).
         * unsat -- skeleton-feasible but not delta-realizable: a spurious pairing.
                    Only ``path_const AND word`` is excluded, not ``path_const``
-                   alone. ``path_const`` need not pin the whole word, so a
-                   structure-wide block would drop sibling words that share this
-                   reduced path but were never verified; blocking the pair keeps
-                   them available. (The propose/block split lives in
-                   ``ReducedPivotSearch``; ``next`` blocks structure-wide for the
-                   box strategy, which verifies exactly ``total_const``.)
+                   alone, so a sibling word that shares this reduced path stays
+                   available.
 
-        The search running ``unsat`` exhausts the structure space, and because
-        skeleton-feasibility over-approximates delta-feasibility that is a sound
-        proof that no falsifying word remains outside the pool (or, under a
-        coarsening radius, outside the union of the balls -- reported as such). A
-        search ``unknown`` (scenario solver or reduced-query minimizer), a
+        The per-candidate dReal check is the expensive step and each check is an
+        independent subprocess, so when ``[common]`` parallel is enabled they are
+        fanned across a worker pool while proposal, the linear feasibility screen
+        and block bookkeeping stay on the calling thread (all z3). Candidates are
+        committed in proposal order. Every result is sound. A depth that pools
+        nothing (a safety property, the exhaustion-dominated case) is decided
+        identically to the serial reference and only faster, since every block is
+        then the same regardless of a verdict. A depth that pools a word commits
+        in fan-out order rather than serial proposal order, so its greedy
+        radius-separated pool may differ from the serial one while remaining a
+        valid pool: the verdict is the same, the radius separation is enforced at
+        commit so a wider pool cannot pool a word inside an earlier word's ball,
+        and -- when the depth runs to natural exhaustion (no ``[gen] k-paths`` cap
+        and no binding ``[gen] pivot-budget``) -- at radius 0 the word set and
+        count match serial. Under a finite ``k-paths`` cap even the radius-0 pool
+        can be a different valid subset, because speculation after a SAT changes
+        which later word reaches the cap. The verdict match likewise holds only
+        absent a binding ``pivot-budget``: under one the pool advances faster, so
+        this run may reach a counterexample or exhaust a depth within the budget
+        where the serial run reports ``Unknown`` -- both sound, not identical.
+
+        A search ``unknown`` (scenario solver or reduced-query minimizer), a
         verification ``unknown``, or hitting the ``[gen] pivot-budget`` elapsed
         bound leaves the depth unresolved without corrupting the verdict, so an
         honest ``Unknown`` is reported rather than relying on an external timeout.
@@ -509,11 +584,7 @@ class DiscretePathEnum(Algorithm):
         search. The word block, the radius cap, the depth-scoping verdict and the
         exhaustion wording are the same as the exact path.
         """
-        pool: list[dict[Variable, Constant]] = []
-        block_id = 0
-        unresolved = False
-        first_depth = max_depth
-        decided: list[int] = []
+        acc = _PathReducedAcc(max_depth)
         feasibility = LinearWordFeasibilityFilter(
             encoder.model, tau_max, getattr(self, "_time_horizon", None))
 
@@ -526,230 +597,339 @@ class DiscretePathEnum(Algorithm):
         # more structures than there are words, so a bound turns a runaway depth
         # into an honest Unknown instead of leaving it to the external timeout.
         depth_budget = gen_float(config, "pivot-budget")
+        workers = self._path_verify_workers(config)
 
-        for depth in target_depths:
-            components = encoder.enumerate_components_at(depth)
-            search = self._make_reduced_search(
-                components, encoder.model, seed, timeout_ms)
-
-            found = 0
-            coarsened = False   # a radius>=1 block was asserted at this depth
-            capped = False      # the cap has been reported at this depth
-            pooled_words: set[tuple] = set()
-            candidates = 0            # structures the scenario search returned
-            calls: list[float] = []   # seconds taken by each dReal verification
-            undecided = False         # a verify/minimizer returned UNKNOWN here
-            depth_start = time.perf_counter()
-            while per_depth is None or found < per_depth:
-                if (depth_budget is not None
-                        and time.perf_counter() - depth_start > depth_budget):
-                    unresolved = True
-                    undecided = True
-                    printer.print_normal(
-                        f"[kappa_path] depth {depth}: stopped at the [gen] "
-                        f"pivot-budget ({depth_budget}s) after {candidates} "
-                        f"candidate structure(s) -- the path space is NOT proven "
-                        "exhausted")
-                    break
-
-                res = search.propose()
-                if res is None:
-                    # UNSAT exhausts the structure space (and hence the falsifying
-                    # words); UNKNOWN means the scenario solver or the reduced-query
-                    # minimizer gave up, which is not evidence of absence. An
-                    # exhausted skeleton space only settles the depth when every
-                    # structure was decided: a verify or minimizer UNKNOWN leaves a
-                    # skeleton-feasible structure of unknown delta-feasibility, so
-                    # absence is not established despite the search running dry.
-                    if search.last_verdict() == UNSAT and not undecided:
-                        decided.append(depth)
-                        printer.print_normal(
-                            _exhaustion_note(depth, found, coarsened))
-                    elif search.last_verdict() == UNSAT:
-                        printer.print_normal(
-                            f"[kappa_path] depth {depth}: the skeleton space is "
-                            "enumerated but at least one structure was undecided, "
-                            "so absence is NOT established at this depth")
-                    else:
-                        unresolved = True
-                        printer.print_normal(
-                            f"[kappa_path] depth {depth}: structure search "
-                            "UNRESOLVED (scenario solver or reduced-query "
-                            "minimizer did not decide) -- the path space is NOT "
-                            "proven exhausted")
-                    break
-
-                candidates += 1
-                total_const, path_const, assn = res
-                word = _location_word(assn)
-                bad = _off_lattice(word)
-                missing = _missing_modes(word, depth)
-                if not word or bad or missing:
-                    # The same guard the exact path applies: a model whose word
-                    # is off the mode lattice or short of its depth+1 arity cannot
-                    # be pinned or blocked, so it is not pooled and the depth stops
-                    # unresolved.
-                    unresolved = True
-                    if not word:
-                        what = "no currentMode_k variables in the model"
-                    elif bad:
-                        what = ", ".join(bad)
-                    else:
-                        what = "missing " + ", ".join(missing)
-                    printer.print_normal(
-                        f"[kappa_path] depth {depth}: cannot block this model "
-                        f"({what}); the model is not pooled and the depth stops "
-                        "UNRESOLVED -- the path space is NOT proven exhausted")
-                    break
-
-                word = [(var, _canon_mode_val(val)) for var, val in word]
-                word_str = ".".join(str(val.value) for _, val in word)
-                word_pin = fix_modes(dict(word))
-                # The word-aware exclusion for a pair that is not pooled: remove
-                # (this reduced path AND this word), leaving the path available to
-                # a sibling word.
-                pair_block = Not(And([path_const, word_pin]))
-
-                # Skip the backend for a word with no run; block the whole word.
-                mode_seq = [int(round(float(val.value))) for _, val in word]
-                if feasibility.word_is_infeasible(depth, mode_seq):
-                    if candidates == 1 or candidates % every == 0:
-                        printer.print_verbose(
-                            f"[kappa_path] depth {depth}: candidate {candidates} "
-                            f"(word {word_str}) infeasible on the linear timeline "
-                            "-- skipped")
-                    search.add_block(Not(word_pin))
-                    continue
-
-                # Verify the structure on dReal via the reduced query, pinning the
-                # word so the delta-sat witness spells exactly this structure's
-                # word rather than a sibling a free mode would admit.
-                verifier = make_oracle(
-                    underlying="dreal", logic=logic, seed=seed, config=config,
-                    logger=logger, time_bound=tau_max)
-                verifier.assert_(total_const)
-                verifier.assert_(word_pin)
-                # Clamp this call to the budget left in the depth, as the box
-                # strategy clamps its candidate calls. The budget is checked at
-                # the top of the loop, so without this a call that starts just
-                # under the budget could run a full [gen] query-timeout past it;
-                # the clamp keeps pivot-budget a near-hard bound (the residual is
-                # only the pre-solve constraint-tree walk and SMT2 write, which
-                # the per-call bound does not cover). Floored at _MIN_CALL_BUDGET
-                # so the last call still gets a real, if short, attempt.
-                if depth_budget is not None:
-                    remaining = depth_budget - (time.perf_counter() - depth_start)
-                    call_budget = max(remaining, _MIN_CALL_BUDGET)
-                    if qsec is not None:
-                        call_budget = min(call_budget, qsec)
-                    verifier.set_budget(call_budget)
-                started = time.perf_counter()
-                verdict = verifier.check()
-                calls.append(time.perf_counter() - started)
-                # A refutation is the common, uninteresting case; throttle it so
-                # the satisfiable and undecided results stay legible.
-                if verdict != UNSAT or candidates == 1 or candidates % every == 0:
-                    printer.print_verbose(
-                        f"[kappa_path] depth {depth}: candidate {candidates} "
-                        f"(word {word_str}) over {found} pooled word(s): "
-                        f"{verdict} in {calls[-1]:.3f}s")
-
-                if verdict == UNKNOWN:
-                    # Exclude this (path, word) pair so the search advances, but
-                    # leave the depth unable to claim exhaustion. Unlike the exact
-                    # path this continues rather than stopping the depth: the
-                    # reduced path poses many cheap queries where the exact path
-                    # poses one expensive one, so a single undecided structure must
-                    # not discard the rest of the pool. The verdict stays honest
-                    # because `unresolved` forces it off `True`.
-                    unresolved = True
-                    undecided = True
-                    search.add_block(pair_block)
-                    why = verifier.unknown_reason() or "backend did not decide"
-                    printer.print_normal(
-                        f"[kappa_path] depth {depth}: candidate {candidates} "
-                        f"(word {word_str}) UNRESOLVED ({why}) -- this structure "
-                        "is not counted toward exhaustion")
-                    continue
-
-                if verdict == UNSAT:
-                    # Skeleton-feasible but not delta-realizable under this word.
-                    # Exclude only the pair; the word stays available to another
-                    # reduced path that may realize it.
-                    search.add_block(pair_block)
-                    continue
-
-                # SAT: a genuine delta-falsifier for this word.
-                model = verifier.model()
-                mw = _location_word(model)
-                if _missing_modes(mw, depth) or _off_lattice(mw):
-                    # The witness must carry the full location word for the pool
-                    # and for downstream validation. If it does not, exclude the
-                    # pair and leave the depth unresolved rather than pool a
-                    # schema-incomplete witness.
-                    unresolved = True
-                    undecided = True
-                    search.add_block(pair_block)
-                    printer.print_normal(
-                        f"[kappa_path] depth {depth}: candidate {candidates} "
-                        f"(word {word_str}) is satisfiable but its witness omits "
-                        "part of the location word; not pooled, depth left "
-                        "unresolved")
-                    continue
-
-                word_key = tuple((var.id, val.value) for var, val in word)
-                if word_key in pooled_words:
-                    # The radius block below normally prevents a pooled word from
-                    # recurring; if a coarser state ever lets it, exclude the pair
-                    # and do not pool it twice.
-                    search.add_block(pair_block)
-                    continue
-
-                if not pool:
-                    first_depth = depth
-                pool.append(dict(model))
-                pooled_words.add(word_key)
-
-                # Exclude the word's radius ball -- NOT path_const. Other words
-                # that share this reduced property structure must still be
-                # reachable, so the block is on the word, not the structure.
-                block = block_radius(assn, radius, block_id)
-                if block.radius < radius and not capped:
-                    capped = True
-                    printer.print_normal(
-                        f"[kappa_path] depth {depth}: [gen] radius {radius} "
-                        f"exceeds the {depth + 1} positions of a word at this "
-                        f"depth; capped to {block.radius}")
-                coarsened = coarsened or block.radius >= 1
-                search.add_block(block.clause)
-                block_id += 1
-                found += 1
-                printer.print_verbose(
-                    f"[kappa_path] depth {depth}: {found} word(s) here, "
-                    f"{len(pool)} total")
-            else:
-                printer.print_normal(
-                    f"[kappa_path] depth {depth}: stopped at the [gen] k-paths "
-                    f"budget after {found} word(s) -- the path space at this "
-                    "depth is NOT known to be exhausted")
-
-            if calls:
-                printer.print_normal(
-                    f"[kappa_path] depth {depth}: pooled {found} word(s) from "
-                    f"{candidates} candidate structure(s) over {len(calls)} "
-                    f"dReal call(s), {sum(calls):.2f}s total, "
-                    f"slowest {max(calls):.2f}s")
-
-            encoder.reset()
+        # One run-scoped pool for the whole discovery, released under try/finally
+        # so an exception cannot leak live threads. Proposal, the linear screen
+        # and block bookkeeping run on this thread; the workers only run dReal.
+        # ``live`` tracks the in-flight checks so they are killed at shutdown
+        # rather than waited out.
+        pool_exec = (ThreadPoolExecutor(max_workers=workers)
+                     if workers > 1 else None)
+        live = _LiveVerifiers()
+        try:
+            for depth in target_depths:
+                components = encoder.enumerate_components_at(depth)
+                search = self._make_reduced_search(
+                    components, encoder.model, seed, timeout_ms)
+                if pool_exec is None:
+                    self._reduced_depth_serial(
+                        acc, depth, search, per_depth, radius, feasibility,
+                        qsec, every, depth_budget, config, logger, seed, logic,
+                        tau_max, printer)
+                else:
+                    self._reduced_depth_parallel(
+                        acc, depth, search, per_depth, radius, feasibility,
+                        qsec, every, depth_budget, config, logger, seed, logic,
+                        tau_max, printer, pool_exec, workers, live)
+                encoder.reset()
+        finally:
+            if pool_exec is not None:
+                # Kill any check still running before releasing the pool, so the
+                # process is not held open until the per-call budgets expire.
+                live.terminate_all()
+                pool_exec.shutdown(wait=False, cancel_futures=True)
 
         printer.print_normal(
-            f"[kappa_path] pooled {len(pool)} counterexample word(s) over "
+            f"[kappa_path] pooled {len(acc.pool)} counterexample word(s) over "
             f"{len(target_depths)} target depth(s)")
 
-        result, note = _verdict(pool, unresolved, decided, max_depth)
+        result, note = _verdict(acc.pool, acc.unresolved, acc.decided, max_depth)
         if note:
             printer.print_normal(note)
-        return result, 0.0, first_depth, pool
+        return result, 0.0, acc.first_depth, acc.pool
+
+    def _reduced_depth_serial(self, acc, depth, search, per_depth, radius,
+                              feasibility, qsec, every, depth_budget, config,
+                              logger, seed, logic, tau_max, printer):
+        """One target depth, one candidate at a time (parallel-core = 1 or
+        parallel off)."""
+        dctx = _PathDepthAcc(depth, radius, per_depth)
+        candidates = 0
+        calls: list[float] = []
+        depth_start = time.perf_counter()
+        while per_depth is None or dctx.found < per_depth:
+            if (depth_budget is not None
+                    and time.perf_counter() - depth_start > depth_budget):
+                acc.unresolved = True
+                dctx.undecided = True
+                printer.print_normal(
+                    f"[kappa_path] depth {depth}: stopped at the [gen] "
+                    f"pivot-budget ({depth_budget}s) after {candidates} "
+                    "candidate structure(s) -- the path space is NOT proven "
+                    "exhausted")
+                break
+
+            res = search.propose()
+            if res is None:
+                self._reduced_exhaustion(acc, dctx, depth, search.last_verdict(),
+                                         printer)
+                break
+
+            candidates += 1
+            raw_word = _location_word(res[2])
+            guard = _guard_reason(raw_word, depth)
+            if guard is not None:
+                acc.unresolved = True
+                printer.print_normal(
+                    f"[kappa_path] depth {depth}: cannot block this model "
+                    f"({guard}); the model is not pooled and the depth stops "
+                    "UNRESOLVED -- the path space is NOT proven exhausted")
+                break
+
+            cand = _reduced_candidate(res, depth)
+            if feasibility.word_is_infeasible(depth, cand.mode_seq):
+                if candidates == 1 or candidates % every == 0:
+                    printer.print_verbose(
+                        f"[kappa_path] depth {depth}: candidate {candidates} "
+                        f"(word {cand.word_str}) infeasible on the linear "
+                        "timeline -- skipped")
+                search.add_block(Not(cand.word_pin))
+                continue
+
+            verifier = make_oracle(
+                underlying="dreal", logic=logic, seed=seed, config=config,
+                logger=logger, time_bound=tau_max)
+            verifier.assert_(cand.total_const)
+            verifier.assert_(cand.word_pin)
+            if depth_budget is not None:
+                remaining = depth_budget - (time.perf_counter() - depth_start)
+                call_budget = max(remaining, _MIN_CALL_BUDGET)
+                if qsec is not None:
+                    call_budget = min(call_budget, qsec)
+                verifier.set_budget(call_budget)
+            started = time.perf_counter()
+            verdict = verifier.check()
+            calls.append(time.perf_counter() - started)
+            model = dict(verifier.model()) if verdict == SAT else None
+            why = verifier.unknown_reason() if verdict == UNKNOWN else None
+            _kind, block = _reduced_commit(
+                acc, dctx, cand, verdict, model, why, candidates, calls[-1],
+                every, printer)
+            search.add_block(block)
+        else:
+            printer.print_normal(
+                f"[kappa_path] depth {depth}: stopped at the [gen] k-paths "
+                f"budget after {dctx.found} word(s) -- the path space at this "
+                "depth is NOT known to be exhausted")
+
+        if calls:
+            printer.print_normal(
+                f"[kappa_path] depth {depth}: pooled {dctx.found} word(s) from "
+                f"{candidates} candidate structure(s) over {len(calls)} dReal "
+                f"call(s), {sum(calls):.2f}s total, slowest {max(calls):.2f}s")
+
+    def _reduced_depth_parallel(self, acc, depth, search, per_depth, radius,
+                                feasibility, qsec, every, depth_budget, config,
+                                logger, seed, logic, tau_max, printer, pool_exec,
+                                workers, live):
+        """One target depth with the per-candidate dReal checks fanned across the
+        pool. Proposal, the linear screen and block bookkeeping stay on this
+        thread; feasible candidates are proposed ahead under a provisional pair
+        block (which advances the search and is the block a refuted candidate
+        keeps), and their checks run on the pool. Results commit in proposal
+        order: a pooled word adds its radius block, and the radius separation is
+        re-checked at commit so a candidate proposed before an earlier word's
+        block landed cannot pool a word inside that word's ball."""
+        dctx = _PathDepthAcc(depth, radius, per_depth)
+        candidates = 0
+        calls: list[float] = []
+        depth_start = time.perf_counter()
+        deadline = None if depth_budget is None else depth_start + depth_budget
+        window = _WINDOW_FACTOR * workers
+
+        inflight: dict = {}   # pos -> (cand, future)
+        ready: dict = {}      # pos -> ("skip", cand) | ("job", cand, v, m, el, why)
+        next_pos = 0
+        commit_pos = 1
+        spent = None          # None | UNSAT | UNKNOWN | "guard"
+        guard_msg = None
+        capped = False        # the [gen] k-paths budget was reached
+
+        def _verify(cand):
+            # Read the budget when the worker starts (not when queued): a
+            # candidate that waited behind draining work still respects what is
+            # left of the depth budget. None left: UNKNOWN without launching
+            # dReal, matching the serial per-call clamp.
+            call_budget = None
+            if deadline is not None:
+                remaining = deadline - time.perf_counter()
+                if remaining <= 0:
+                    return (UNKNOWN, None, 0.0,
+                            "the per-depth [gen] pivot-budget elapsed before "
+                            "this candidate started")
+                call_budget = max(remaining, _MIN_CALL_BUDGET)
+                if qsec is not None:
+                    call_budget = min(call_budget, qsec)
+            verifier = make_oracle(
+                underlying="dreal", logic=logic, seed=seed, config=config,
+                logger=logger, time_bound=tau_max)
+            # Registered so a cap or the run's end can kill this check instead of
+            # waiting out its budget; discarded when it returns.
+            live.add(verifier)
+            try:
+                verifier.assert_(cand.total_const)
+                verifier.assert_(cand.word_pin)
+                if call_budget is not None:
+                    verifier.set_budget(call_budget)
+                t0 = time.perf_counter()
+                v = verifier.check()
+                el = time.perf_counter() - t0
+                m = dict(verifier.model()) if v == SAT else None
+                why = verifier.unknown_reason() if v == UNKNOWN else None
+                return (v, m, el, why)
+            finally:
+                live.discard(verifier)
+
+        while True:
+            while (spent is None and len(inflight) < window
+                   and (deadline is None or time.perf_counter() < deadline)
+                   and (per_depth is None or dctx.found < per_depth)):
+                res = search.propose()
+                if res is None:
+                    spent = (UNSAT if search.last_verdict() == UNSAT
+                             else UNKNOWN)
+                    break
+                raw_word = _location_word(res[2])
+                guard = _guard_reason(raw_word, depth)
+                if guard is not None:
+                    guard_msg = (
+                        f"[kappa_path] depth {depth}: cannot block this model "
+                        f"({guard}); the model is not pooled and the depth "
+                        "stops UNRESOLVED -- the path space is NOT proven "
+                        "exhausted")
+                    spent = "guard"
+                    break
+                next_pos += 1
+                pos = next_pos
+                cand = _reduced_candidate(res, depth)
+                if feasibility.word_is_infeasible(depth, cand.mode_seq):
+                    search.add_block(Not(cand.word_pin))
+                    ready[pos] = ("skip", cand)
+                    continue
+                search.add_block(cand.pair_block)
+                inflight[pos] = (cand, pool_exec.submit(_verify, cand))
+
+            for pos in [p for p, (c, f) in inflight.items() if f.done()]:
+                cand, fut = inflight.pop(pos)
+                v, m, el, why = fut.result()
+                ready[pos] = ("job", cand, v, m, el, why)
+
+            while commit_pos in ready:
+                item = ready.pop(commit_pos)
+                if item[0] == "skip":
+                    cand = item[1]
+                    candidates += 1
+                    if candidates == 1 or candidates % every == 0:
+                        printer.print_verbose(
+                            f"[kappa_path] depth {depth}: candidate "
+                            f"{candidates} (word {cand.word_str}) infeasible on "
+                            "the linear timeline -- skipped")
+                    commit_pos += 1
+                    continue
+                _tag, cand, v, m, el, why = item
+                candidates += 1
+                calls.append(el)
+                kind, block = _reduced_commit(
+                    acc, dctx, cand, v, m, why, candidates, el, every, printer)
+                if kind == "pool":
+                    # The provisional pair block is already installed; the radius
+                    # block (which subsumes it) excludes this word's ball from
+                    # every later proposal.
+                    search.add_block(block)
+                commit_pos += 1
+                if per_depth is not None and dctx.found >= per_depth:
+                    capped = True
+                    break
+
+            # A path budget already met with nothing left to commit or verify
+            # (normally reached in the commit loop above; also the degenerate
+            # k-paths = 0, which proposes no query at all).
+            if (not capped and per_depth is not None
+                    and dctx.found >= per_depth and not inflight
+                    and commit_pos not in ready):
+                capped = True
+
+            if capped:
+                for _c, f in inflight.values():
+                    f.cancel()
+                # Kill the speculative checks the cap makes stale so the pool is
+                # not held blocked until their budgets expire.
+                live.terminate_all()
+                inflight = {}
+                ready = {}
+                printer.print_normal(
+                    f"[kappa_path] depth {depth}: stopped at the [gen] k-paths "
+                    f"budget after {dctx.found} word(s) -- the path space at "
+                    "this depth is NOT known to be exhausted")
+                break
+
+            past_deadline = (deadline is not None
+                             and time.perf_counter() >= deadline)
+            if not inflight and (spent is not None or past_deadline):
+                break
+
+            can_refill = (spent is None and len(inflight) < window
+                          and (deadline is None
+                               or time.perf_counter() < deadline)
+                          and (per_depth is None or dctx.found < per_depth))
+            if inflight and not can_refill and commit_pos not in ready:
+                pending = [f for _c, f in inflight.values()]
+                timeout = (None if deadline is None
+                           else max(0.0, deadline - time.perf_counter()))
+                done_set, _ = wait(pending, timeout=timeout,
+                                   return_when=FIRST_COMPLETED)
+                if (not done_set and deadline is not None
+                        and time.perf_counter() >= deadline):
+                    for _c, f in inflight.values():
+                        f.cancel()
+                    # Kill checks the deadline makes stale so the depth is not
+                    # held open until their per-call budgets expire.
+                    live.terminate_all()
+                    inflight = {}
+
+        if spent == "guard":
+            acc.unresolved = True
+            if guard_msg:
+                printer.print_normal(guard_msg)
+        elif spent in (UNSAT, UNKNOWN):
+            self._reduced_exhaustion(acc, dctx, depth, spent, printer)
+        elif not capped and deadline is not None and (
+                time.perf_counter() >= deadline):
+            acc.unresolved = True
+            dctx.undecided = True
+            printer.print_normal(
+                f"[kappa_path] depth {depth}: stopped at the [gen] pivot-budget "
+                f"({depth_budget}s) after {candidates} candidate structure(s) "
+                "-- the path space is NOT proven exhausted")
+
+        if calls:
+            printer.print_normal(
+                f"[kappa_path] depth {depth}: pooled {dctx.found} word(s) from "
+                f"{candidates} candidate structure(s) over {len(calls)} dReal "
+                f"call(s), {sum(calls):.2f}s total, slowest {max(calls):.2f}s")
+
+    def _reduced_exhaustion(self, acc, dctx, depth, last_verdict, printer):
+        """Depth-scoping at proposal exhaustion, shared by both paths. An
+        exhausted skeleton space settles the depth only when every structure was
+        decided: a verify or minimizer UNKNOWN leaves a structure of unknown
+        delta-feasibility, so absence is not established despite the search
+        running dry."""
+        if last_verdict == UNSAT and not dctx.undecided:
+            acc.decided.append(depth)
+            printer.print_normal(_exhaustion_note(depth, dctx.found,
+                                                  dctx.coarsened))
+        elif last_verdict == UNSAT:
+            printer.print_normal(
+                f"[kappa_path] depth {depth}: the skeleton space is enumerated "
+                "but at least one structure was undecided, so absence is NOT "
+                "established at this depth")
+        else:
+            acc.unresolved = True
+            printer.print_normal(
+                f"[kappa_path] depth {depth}: structure search UNRESOLVED "
+                "(scenario solver or reduced-query minimizer did not decide) -- "
+                "the path space is NOT proven exhausted")
 
     def _make_reduced_search(self, components, model, seed, timeout_ms):
         """Construct the reduced-query structure search. A seam so a test can
@@ -757,3 +937,175 @@ class DiscretePathEnum(Algorithm):
         ``path_const`` -- the case the word-aware block exists for."""
         return ReducedPivotSearch(
             components, model, seed=seed, timeout_ms=timeout_ms)
+
+
+class _PathReducedAcc:
+    """Run-level accumulators of the delta (reduced two-step) enumeration,
+    mutated across target depths."""
+
+    def __init__(self, max_depth: int) -> None:
+        self.pool: list[dict[Variable, Constant]] = []
+        self.block_id = 0
+        self.unresolved = False
+        self.first_depth = max_depth
+        self.decided: list[int] = []
+
+
+class _PathDepthAcc:
+    """Per-depth accumulators of the delta enumeration."""
+
+    def __init__(self, depth: int, radius: int, per_depth) -> None:
+        self.depth = depth
+        self.radius = radius
+        # The radius the block actually encodes: capped at the word length
+        # (depth positions), so the commit-time separation check matches the
+        # ball the block excludes rather than the uncapped configured radius.
+        self.eff_radius = max(0, min(radius, depth))
+        self.per_depth = per_depth
+        self.found = 0
+        self.coarsened = False   # a radius>=1 block was asserted at this depth
+        self.capped = False      # the cap has been reported at this depth
+        self.pooled_words: list[tuple] = []
+        self.undecided = False   # a verify/minimizer returned UNKNOWN here
+
+
+class _ReducedCand(NamedTuple):
+    """A proposed structure with everything the commit needs precomputed."""
+
+    total_const: Formula
+    path_const: Formula
+    assn: dict
+    canon: list
+    word_str: str
+    word_pin: Formula
+    pair_block: Formula
+    mode_seq: list
+
+
+def _guard_reason(raw_word, depth: int):
+    """Why a proposed word cannot be pinned or blocked, or None when it is
+    sound: an empty word, an off-lattice mode value, or a word short of its
+    depth+1 arity. Either way a block built from it would miss the word the
+    solver satisfied, so the caller drops the model and stops the depth."""
+    if not raw_word:
+        return "no currentMode_k variables in the model"
+    bad = _off_lattice(raw_word)
+    if bad:
+        return ", ".join(bad)
+    missing = _missing_modes(raw_word, depth)
+    if missing:
+        return "missing " + ", ".join(missing)
+    return None
+
+
+def _reduced_candidate(res, depth: int) -> _ReducedCand:
+    """Precompute a proposed structure's canonical word, its pin, its pair block
+    and its mode sequence. Assumes ``_guard_reason(word, depth)`` is None."""
+    total_const, path_const, assn = res
+    canon = [(var, _canon_mode_val(val)) for var, val in _location_word(assn)]
+    word_str = ".".join(str(val.value) for _, val in canon)
+    word_pin = fix_modes(dict(canon))
+    # The word-aware exclusion for a pair that is not pooled: remove (this
+    # reduced path AND this word), leaving the path available to a sibling word.
+    pair_block = Not(And([path_const, word_pin]))
+    mode_seq = [int(round(float(val.value))) for _, val in canon]
+    return _ReducedCand(total_const, path_const, assn, canon, word_str,
+                        word_pin, pair_block, mode_seq)
+
+
+def _word_key(canon) -> tuple:
+    """A hashable, position-ordered key of a canonical word for de-duplication
+    and Hamming comparison."""
+    return tuple((var.id, val.value) for var, val in canon)
+
+
+def _within_ball(key, pooled, radius: int) -> bool:
+    """Whether ``key`` is within Hamming distance ``radius`` of any pooled word
+    (words at a depth share their positions, so equal-length comparison is
+    exact). At radius 0 this is exact de-duplication."""
+    for other in pooled:
+        if sum(1 for a, b in zip(key, other) if a[1] != b[1]) <= radius:
+            return True
+    return False
+
+
+def _reduced_commit(acc, dctx, cand, verdict, model, why, candidate_no,
+                    elapsed, every, printer):
+    """Apply one verified candidate's verdict: pool a genuine delta-falsifier,
+    or exclude a refuted/undecided pair. Mutates ``acc`` (pool, block id, first
+    depth, unresolved) and ``dctx`` (found, coarsening, cap, pooled words,
+    undecided), and returns ``(kind, block)`` where ``kind`` is ``"pool"`` for a
+    pooled word (its radius block) or ``"block"`` otherwise (the pair block)."""
+    depth = dctx.depth
+    # A refutation is the common, uninteresting case; throttle it so the
+    # satisfiable and undecided results stay legible.
+    if verdict != UNSAT or candidate_no == 1 or candidate_no % every == 0:
+        printer.print_verbose(
+            f"[kappa_path] depth {depth}: candidate {candidate_no} "
+            f"(word {cand.word_str}) over {dctx.found} pooled word(s): "
+            f"{verdict} in {elapsed:.3f}s")
+
+    if verdict == UNKNOWN:
+        acc.unresolved = True
+        dctx.undecided = True
+        why_txt = why or "backend did not decide"
+        printer.print_normal(
+            f"[kappa_path] depth {depth}: candidate {candidate_no} "
+            f"(word {cand.word_str}) UNRESOLVED ({why_txt}) -- this structure "
+            "is not counted toward exhaustion")
+        return "block", cand.pair_block
+
+    if verdict == UNSAT:
+        return "block", cand.pair_block
+
+    mw = _location_word(model)
+    if _missing_modes(mw, depth) or _off_lattice(mw):
+        acc.unresolved = True
+        dctx.undecided = True
+        printer.print_normal(
+            f"[kappa_path] depth {depth}: candidate {candidate_no} "
+            f"(word {cand.word_str}) is satisfiable but its witness omits part "
+            "of the location word; not pooled, depth left unresolved")
+        return "block", cand.pair_block
+
+    key = _word_key(cand.canon)
+    # The witness must spell the pinned word. A delta-sat model is a relaxed
+    # witness, so it can carry a complete integral word other than the pinned
+    # one; pooling it while blocking the pinned word would leave the pool entry
+    # and its exclusion disagreeing. Reject like the schema-incomplete case:
+    # exclude the pinned pair and leave the depth unresolved.
+    if _word_key([(var, _canon_mode_val(val)) for var, val in mw]) != key:
+        acc.unresolved = True
+        dctx.undecided = True
+        printer.print_normal(
+            f"[kappa_path] depth {depth}: candidate {candidate_no} "
+            f"(word {cand.word_str}) is satisfiable but its witness spells a "
+            "different word; not pooled, depth left unresolved")
+        return "block", cand.pair_block
+    # Enforce radius separation at commit: a word inside an already-pooled word's
+    # ball is excluded even if it was proposed before that word's block landed.
+    # The ball uses the effective (capped) radius, so at radius 0 -- and at a
+    # radius capped to 0 by the word length, e.g. depth 0 -- this is exact
+    # de-duplication and never drops a distinct word.
+    if _within_ball(key, dctx.pooled_words, dctx.eff_radius):
+        return "block", cand.pair_block
+
+    if not acc.pool:
+        acc.first_depth = depth
+    acc.pool.append(dict(model))
+    dctx.pooled_words.append(key)
+
+    block = block_radius(cand.assn, dctx.radius, acc.block_id)
+    if block.radius < dctx.radius and not dctx.capped:
+        dctx.capped = True
+        printer.print_normal(
+            f"[kappa_path] depth {depth}: [gen] radius {dctx.radius} exceeds "
+            f"the {depth + 1} positions of a word at this depth; capped to "
+            f"{block.radius}")
+    dctx.coarsened = dctx.coarsened or block.radius >= 1
+    acc.block_id += 1
+    dctx.found += 1
+    printer.print_verbose(
+        f"[kappa_path] depth {depth}: {dctx.found} word(s) here, "
+        f"{len(acc.pool)} total")
+    return "pool", block.clause
