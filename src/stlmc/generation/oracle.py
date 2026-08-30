@@ -43,6 +43,7 @@ from __future__ import annotations
 import abc
 import itertools
 import os
+import threading
 from fractions import Fraction
 from typing import Dict, Tuple
 
@@ -286,6 +287,16 @@ class DrealReSolveOracle(GrowthOracle):
         # A stack of frames; each frame is a list of asserted formulas.
         self._frames: list[list[Formula]] = [[]]
         self._last_model: dict[Variable, Constant] | None = None
+        # The dReal subprocess of the call in progress (budgeted path only),
+        # so a caller on another thread can kill a check it no longer needs
+        # instead of waiting out the per-call budget. Guarded by a lock because
+        # the worker thread sets and clears it while a terminating thread reads
+        # it.
+        self._active_proc = None
+        # Sticky: set by terminate() so a check still launching its subprocess
+        # is killed at launch rather than slipping past a single kill sweep.
+        self._terminated = False
+        self._proc_lock = threading.Lock()
 
     def assert_(self, formula: Formula) -> None:
         self._frames[-1].append(formula)
@@ -367,16 +378,15 @@ class DrealReSolveOracle(GrowthOracle):
         if self._time_bound is not None:
             solver.set_time_bound(self._time_bound)
         budget = self._query_budget()
-        if budget is None:
-            result, _size = solver.solve(consts, None, None)
-            model = (solver.make_assignment().get_assignments()
-                     if result == "False" else None)
-            return result, model
 
-        # Budgeted solve. Uses dRealSolver.process(), which hands back the Popen
-        # (so it can be killed) and classifies on returncode rather than by
-        # string-matching the model text. Without a budget an undecidable probe
-        # hangs the whole run: upstream's only timeout is 1e8 seconds.
+        # Both the budgeted and the unbudgeted solve go through
+        # dRealSolver.process(), which hands back the Popen so terminate() can
+        # kill the subprocess (a look-ahead the caller abandoned, a stopped
+        # depth, an interrupted run) instead of leaving it to outlive the Python
+        # process. solver.solve() hides the subprocess and cannot be killed. The
+        # budget bounds the wait and classifies on returncode rather than by
+        # string-matching the model text; without a budget the wait blocks until
+        # dReal returns, since upstream's only internal timeout is 1e8 seconds.
         import queue as _q
         import shutil as _sh
         import threading as _th
@@ -405,24 +415,64 @@ class DrealReSolveOracle(GrowthOracle):
         main_queue: _q.Queue = _q.Queue()
         sema = _th.Semaphore(0)
         proc = solver.process(main_queue, sema, consts)
+        with self._proc_lock:
+            # terminate() can fire between the caller registering this oracle and
+            # the subprocess existing; the sticky flag lets that window still be
+            # honored, so an abandoned or interrupted check cannot outlive the
+            # request by racing past a single sweep.
+            if self._terminated:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                self._active_proc = None
+                _drop()
+                return "Unknown", None
+            self._active_proc = proc
         try:
-            msg = main_queue.get(timeout=budget)
-            # base commit puts (result, assignment, id(proc)); later upstream
-            # revisions append elapsed and an error message.
-            result, assignment = msg[0], msg[1]
-        except _q.Empty:
+            try:
+                # budget None blocks until dReal returns (or terminate kills it).
+                msg = main_queue.get(timeout=budget)
+                # base commit puts (result, assignment, id(proc)); later upstream
+                # revisions append elapsed and an error message.
+                result, assignment = msg[0], msg[1]
+            except _q.Empty:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                self.timeouts += 1
+                self._unknown_reason = (
+                    f"dReal exceeded the per-call [gen] query-timeout "
+                    f"({budget}s)")
+                _drop()
+                return "Unknown", None
+            model = assignment.get_assignments() if result == "False" else None
+            _drop()
+            return result, model
+        finally:
+            with self._proc_lock:
+                self._active_proc = None
+
+    def terminate(self) -> None:
+        """Kill the dReal subprocess of an in-progress check, if any, and poison
+        this oracle so a check whose subprocess does not exist yet is killed the
+        moment it starts.
+
+        Best effort and safe to call from another thread: a caller that no
+        longer needs a check (a strategy that stopped a depth, an ended or
+        interrupted run) kills it here instead of waiting out the per-call
+        budget. A terminated check returns Unknown. The flag closes the race
+        where terminate arrives after the caller registered the oracle but
+        before its subprocess is launched."""
+        with self._proc_lock:
+            self._terminated = True
+            proc = self._active_proc
+        if proc is not None:
             try:
                 proc.kill()
             except Exception:
                 pass
-            self.timeouts += 1
-            self._unknown_reason = (
-                f"dReal exceeded the per-call [gen] query-timeout ({budget}s)")
-            _drop()
-            return "Unknown", None
-        model = assignment.get_assignments() if result == "False" else None
-        _drop()
-        return result, model
 
     def set_budget(self, seconds):
         """Override the per-call budget (None = unbudgeted) until reset."""
