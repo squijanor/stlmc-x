@@ -56,6 +56,11 @@ class EnumerateAlgorithm(Algorithm):
         query_budget = DEFAULT_QUERY_BUDGET if isinstance(solver, dRealSolver) else None
         total_budget = resolve_solver_timeout(config)
 
+        if isinstance(solver, dRealSolver):
+            from ..generation.common import backend_precision, ode_settings
+            solver.set_ode_settings(*ode_settings(config))
+            solver.set_precision(backend_precision(config, "dreal"))
+
         if self.runner is None:
             if parallel == "true":
                 self.runner = ParallelAlgRunner(core, query_budget=query_budget)
