@@ -1,0 +1,78 @@
+# A small four-mode hybrid automaton for the kappa_path end-to-end tests.
+# Flows are piecewise-linear (the enumeration runs in QF_LRA) and every jump
+# carries a guard and an identity reset, which the reduced two-step test reads
+# back off the reconstructed query. Modes M0/M1/M2 hold x1 below eight by their
+# invariant, so x1 exceeds eight only in M3; M3 is reachable in two jumps by two
+# distinct routes, giving structurally distinct falsifying words at depth two.
+bool c;
+[0, 20] x1;
+bool d;
+[0, 10] x2;
+{
+    mode:
+        c = false;
+        d = false;
+    inv:
+        x1 < 8;
+        x2 > 0;
+    flow:
+        x1(t) = 0.4 * t + x1(0);
+        x2(t) = -0.5 * t + x2(0);
+    jump:
+        x2 <= 4 =>
+          (and (not c') d' (x1' = x1) (x2' = x2));
+        x2 <= 3 =>
+          (and c' (not d') (x1' = x1) (x2' = x2));
+}
+{
+    mode:
+        c = false;
+        d = true;
+    inv:
+        x1 < 8;
+        x2 > 0;
+    flow:
+        x1(t) = 0.4 * t + x1(0);
+        x2(t) = -0.5 * t + x2(0);
+    jump:
+        x2 <= 2 =>
+          (and c' d' (x1' = x1) (x2' = x2));
+}
+{
+    mode:
+        c = true;
+        d = false;
+    inv:
+        x1 < 8;
+        x2 > 0;
+    flow:
+        x1(t) = 0.4 * t + x1(0);
+        x2(t) = -0.5 * t + x2(0);
+    jump:
+        x2 <= 2 =>
+          (and c' d' (x1' = x1) (x2' = x2));
+}
+{
+    mode:
+        c = true;
+        d = true;
+    inv:
+        x1 < 20;
+        x2 > 0;
+    flow:
+        x1(t) = 2 * t + x1(0);
+        x2(t) = -0.5 * t + x2(0);
+    jump:
+        x1 >= 15 =>
+          (and (not c') (not d') (x1' = x1) (x2' = x2));
+}
+init:
+(and (not(c)) not(d) (4 <= x1) (x1 <= 5) (5 <= x2) (x2 <= 6));
+
+proposition:
+
+# bound: 10, timebound: 10
+goal:
+[f1]: [][0,8] (x1 <= 3); # threshold: 0.5
+[f2]: [][0,8] (x1 <= 8); # threshold: 0.5
+[f3]: [][0,8] (x1 >= 0); # threshold: 0.5

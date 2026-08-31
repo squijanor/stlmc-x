@@ -17,10 +17,10 @@ import subprocess
 import sys
 
 import pytest
+from conftest import PATH_MODEL as MODEL
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(REPO, "src")
-MODEL = os.path.join(REPO, "benchmarks", "additional", "wat-poly", "water.model")
 
 CFG = """
 common {{
@@ -73,7 +73,7 @@ def radius_one(tmp_path_factory):
     stdout, pool = run_path(tmp, '    k-paths = 3\n    radius = 1\n    depths = "2/3"')
     assert pool is not None, "a falsifying run must write a pool\n" + stdout
     with open(pool, "rb") as fr:
-        return stdout, pickle.load(fr)
+        return stdout, pickle.load(fr), pool
 
 
 # ============================================================ pool contents
@@ -83,7 +83,7 @@ def test_the_pool_holds_no_blocking_artefacts(radius_one):
     in every model the solver returns afterwards, so an unfiltered pool carries
     a number of them that grows with the counterexample's position in the pool.
     They are not part of any counterexample."""
-    _, payload = radius_one
+    _, payload, _ = radius_one
     for index, assignment in enumerate(payload[0]):
         leaked = sorted(v.id for v in assignment if v.id.startswith("hb$"))
         assert not leaked, f"counterexample {index} carries {leaked}"
@@ -94,7 +94,7 @@ def test_the_pool_shape_depends_on_depth_and_not_on_position(radius_one):
     counterexamples at the same depth are assignments over the same encoding, so
     they must carry the same variables. With the blocking artefacts present the
     key set instead grows with the counterexample's position in the pool."""
-    _, payload = radius_one
+    _, payload, _ = radius_one
     by_depth = {}
     for word, assignment in zip(words(payload), payload[0]):
         by_depth.setdefault(len(word), set()).add(
@@ -108,7 +108,7 @@ def test_the_pool_shape_depends_on_depth_and_not_on_position(radius_one):
 def test_paths_are_distinct(radius_one):
     """Enumeration means distinct location words, and under radius 1 they are
     additionally at Hamming distance 2 or more within a depth."""
-    _, payload = radius_one
+    _, payload, _ = radius_one
     per_depth = {}
     for word in words(payload):
         per_depth.setdefault(len(word), []).append(word)
@@ -120,12 +120,14 @@ def test_paths_are_distinct(radius_one):
                 assert distance >= 2, (a, b)
 
 
-def test_serialization_is_canonical(tmp_path_factory):
+def test_serialization_is_canonical(radius_one, tmp_path_factory):
     """The written file is a function of its content. Assignment dicts are built
     by iterating identity-ordered containers, so two runs agreeing in every
-    counterexample would otherwise write files differing in bytes."""
+    counterexample would otherwise write files differing in bytes. The first
+    write is the shared run's pool; the second is an independent run at the same
+    configuration and seed."""
     gen = '    k-paths = 3\n    radius = 1\n    depths = "2/3"'
-    first = run_path(tmp_path_factory.mktemp("canon_a"), gen)[1]
+    first = radius_one[2]
     second = run_path(tmp_path_factory.mktemp("canon_b"), gen)[1]
     with open(first, "rb") as fa, open(second, "rb") as fb:
         assert fa.read() == fb.read()
@@ -200,8 +202,8 @@ def test_exhaustion_under_a_coarsening_radius_is_not_absence(tmp_path):
 def test_exhaustion_without_a_radius_is_over_the_falsifying_words(tmp_path):
     """At radius 0 the UNSAT does establish something, and the claim is bounded:
     no word outside the pool falsifies. It is not that the depth's path lattice
-    was enumerated -- the falsifying subset depends on the goal, and on other
-    benchmarks it is a small fraction of the lattice."""
+    was enumerated -- the falsifying subset depends on the goal, and can be a
+    small fraction of the lattice."""
     stdout, _ = run_path(tmp_path, "    k-paths = 99\n    depths = 2")
     assert "falsifying words exhausted" in stdout, stdout
     assert "no location word outside the pool falsifies" in stdout
@@ -226,12 +228,12 @@ def test_a_radius_above_the_word_length_is_capped_and_reported(tmp_path):
 
 
 def test_an_undecided_depth_is_reported_rather_than_waited_out(tmp_path):
-    """A solver call that will not return is bounded per call, and the result is
-    a reported UNRESOLVED depth and a verdict of Unknown -- not a hang. Under the
-    nonlinear logic this model's flows require, whether a depth is decided at all
-    depends on the order the constraints were built in, which PYTHONHASHSEED
-    fixes; at the seed the harness pins, depth 4 is not decided."""
-    gen = "    k-paths = 2\n    depths = 4\n    query-timeout = 2"
+    """A solver call that cannot return in time is bounded per call, and the
+    result is a reported UNRESOLVED depth and a verdict of Unknown -- not a hang.
+    A per-call bound below the backend's own resolution makes every query answer
+    unknown, so the depth is undecided by construction rather than by relying on
+    a particular model being hard to decide."""
+    gen = '    k-paths = 2\n    depths = 4\n    query-timeout = 0.001'
     stdout, pool = run_path(tmp_path, gen, goal="f2", bound=4)
     assert pool is None
     assert "search UNRESOLVED" in stdout, stdout
@@ -253,7 +255,7 @@ def test_a_pool_with_no_labels_still_records_the_relaxation(radius_one):
     per-counterexample labels contributes an empty list rather than omitting the
     slot -- otherwise the relaxation would land where a consumer reads labels.
     """
-    _, payload = radius_one
+    _, payload, _ = radius_one
     assert len(payload) == 11
     assert payload[9] == [], "kappa_path has no label vocabulary"
     assert payload[10] == 0.0, "the exact backend answers under no relaxation"

@@ -15,8 +15,6 @@ that shares the structure is still enumerated and can still be pooled.
 """
 import os
 
-import pytest
-
 from stlmc.constraints.constraints import Eq, Geq, Leq, Or, Real, RealVal
 from stlmc.generation import encode as _encode  # noqa: F401  resolve import order
 from stlmc.generation.oracle import SAT, UNKNOWN, UNSAT
@@ -24,7 +22,8 @@ from stlmc.generation.pathenum import DiscretePathEnum
 from stlmc.solver.z3 import z3Obj
 
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_AUV_ODE = os.path.join(_REPO, "benchmarks", "auv", "auv-ode", "auv.model")
+_FIXTURE_MODEL = os.path.join(
+    _REPO, "generation_tests", "fixtures", "path_branch.model")
 
 
 # --------------------------------------------------------------------------- #
@@ -359,31 +358,29 @@ def test_a_witness_missing_the_word_is_not_pooled(monkeypatch):
 # --------------------------------------------------------------------------- #
 def test_the_reduced_query_carries_guards_and_resets_on_a_real_model():
     """On a real guarded model, every reconstructed total_const contains the whole
-    model execution as a conjunct -- the branch guard, the Arrived guard and the
-    resets -- so a pooled witness is a run of the automaton, not just a trajectory
-    that satisfies the reduced property. dReal decides the query itself; this is
-    the structural precondition for the mac-side no-guard-violation check.
+    model execution as a conjunct -- the jump guards and the identity resets -- so a
+    pooled witness is a run of the automaton, not just a trajectory that satisfies
+    the reduced property. The backend decides the query itself; this reads the
+    structural precondition for the no-guard-violation check.
 
     The scripted tests above cannot catch a dropped guard because their verifier
     returns a supplied verdict without evaluating model dynamics; this reads the
-    actual reconstructed query on the AUV benchmark instead."""
-    if not os.path.exists(_AUV_ODE):
-        pytest.skip("auv-ode benchmark model not present")
+    actual reconstructed query on a real parsed model instead."""
     from stlmc.generation.encode import Encoder
     from stlmc.generation.reduced import ReducedPivotSearch
     from stlmc.objects.object_factory import ObjectFactory
 
     om = ObjectFactory("model-with-goal-enhanced").generate_object_manager()
-    model, prop_dict, goals, labels = om.generate_objects(_AUV_ODE)
+    model, prop_dict, goals, labels = om.generate_objects(_FIXTURE_MODEL)
     goal = next(g for g in goals if labels.get(g.get_formula()) == "f2")
-    enc = Encoder(model, goal, prop_dict, 0.1, 3.0)
+    enc = Encoder(model, goal, prop_dict, 0.1, 8.0)
     rp = ReducedPivotSearch(enc.enumerate_components_at(2), enc.model, seed=0)
     total_const, _path, _assn = rp.propose()
 
     me = str(rp._model_execution)
     # the whole model execution is a conjunct of the query, verbatim
     assert me in str(total_const)
-    # ... and it carries the real jump guards and a reset equality
-    assert ">= 0.9" in me   # branch guard  x >= 0.9
-    assert ">= 4.4" in me   # Arrived guard x >= 4.4
-    assert "(x_1_0 = x_0_t)" in me   # a reset  x' = x across the first jump
+    # ... and it carries the real jump guards and an identity reset
+    assert "<= 4" in me            # a branch guard
+    assert ">= 15" in me           # a later guard
+    assert "x1_1_0 = x1_0_t" in me  # an identity reset across a jump

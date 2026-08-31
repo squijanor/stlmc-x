@@ -23,6 +23,14 @@ if os.path.isdir(os.path.join(_SRC, "stlmc", "generation")):
     sys.path.insert(0, _SRC)
 
 import stlmc.cli.mc  # noqa: E402,F401  -- import-order shim, see module docstring
+
+# Model files the end-to-end and real-model tests run against. They are small,
+# self-contained hybrid automata that live with the tests, so the suite is
+# independent of the benchmark set.
+_FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
+BOX_MODEL = os.path.join(_FIXTURES, "box_region.model")
+PATH_MODEL = os.path.join(_FIXTURES, "path_branch.model")
+
 from stlmc.constraints.constraints import (  # noqa: E402
     And,
     BoolVal,

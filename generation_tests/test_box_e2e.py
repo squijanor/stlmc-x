@@ -19,10 +19,10 @@ from collections import Counter
 from fractions import Fraction
 
 import pytest
+from conftest import BOX_MODEL as MODEL
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(REPO, "src")
-MODEL = os.path.join(REPO, "benchmarks", "additional", "wat-poly", "water.model")
 
 CFG = """
 common {{
@@ -308,7 +308,22 @@ def deep_pairs_within_theta(payload, axes=("x1_0_0", "x2_0_0"), theta=None):
     return close
 
 
-def test_separation_holds_across_boxes_at_one_depth(tmp_path):
+@pytest.fixture(scope="module")
+def multibox(tmp_path_factory):
+    """One shared k-ic = 3 run whose single depth holds more than one box. The
+    separation and one-entry-per-initial-condition assertions are independent
+    views of it, so the multi-box run happens once."""
+    tmp = tmp_path_factory.mktemp("kappa_box_multibox")
+    stdout, pool = run_box(
+        tmp, k_ic=3,
+        extra="depths = 2\n    k-witness = 3\n    bisect-iters = 4")
+    assert pool is not None, stdout
+    assert stdout.count("box ") > 1, "this test needs more than one box\n" + stdout
+    with open(pool, "rb") as handle:
+        return stdout, pickle.load(handle)
+
+
+def test_separation_holds_across_boxes_at_one_depth(multibox):
     """theta separates the witnesses of a DEPTH, not of a box.
 
     Growth runs unmasked, so a second box at the same depth may regrow across
@@ -316,13 +331,7 @@ def test_separation_holds_across_boxes_at_one_depth(tmp_path):
     first contributed. Checking a box against itself cannot see that, which is
     why every other separation assertion here runs at k-ic = 1.
     """
-    stdout, pool = run_box(
-        tmp_path, k_ic=3,
-        extra="depths = 2\n    k-witness = 3\n    bisect-iters = 4")
-    assert pool is not None, stdout
-    with open(pool, "rb") as handle:
-        payload = pickle.load(handle)
-    assert stdout.count("box ") > 1, "this test needs more than one box\n" + stdout
+    stdout, payload = multibox
     close = deep_pairs_within_theta(payload)
     assert not close, f"deep witnesses closer than theta at one depth: {close[:5]}"
 
@@ -396,7 +405,7 @@ def test_every_record_reports_whether_its_verdict_is_resolved(validation):
         assert rec["resolved"] in ("yes", "no")
 
 
-def test_one_entry_per_initial_condition_across_boxes(tmp_path):
+def test_one_entry_per_initial_condition_across_boxes(multibox):
     """Def. pool rule (ii) is a depth rule too.
 
     Two boxes at one depth can converge on the same face, and a marker is
@@ -405,13 +414,7 @@ def test_one_entry_per_initial_condition_across_boxes(tmp_path):
     axis the metrics measure. The single-box configuration every other
     duplicate assertion runs at cannot see it.
     """
-    stdout, pool = run_box(
-        tmp_path, k_ic=3,
-        extra="depths = 2\n    k-witness = 3\n    bisect-iters = 4")
-    assert pool is not None, stdout
-    with open(pool, "rb") as handle:
-        payload = pickle.load(handle)
-    assert stdout.count("box ") > 1, "this test needs more than one box\n" + stdout
+    stdout, payload = multibox
     axes = [ic_values(payload, v) for v in ("x1_0_0", "x2_0_0")]
     axes = [a for a in axes if a]
     points = list(zip(*axes))

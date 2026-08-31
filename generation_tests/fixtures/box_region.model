@@ -1,0 +1,83 @@
+# A small four-mode hybrid automaton for the kappa_box end-to-end tests.
+# Two continuous variables give a two-dimensional initial-condition box; the
+# four modes and their guards give a depth-2 falsification with more than one
+# falsifying structure, so a k-ic > 1 run opens more than one box and an
+# initial condition can recur across depths.
+bool p;
+[0, 10] x1;
+bool q;
+[0, 10] x2;
+{
+    mode:
+        p = false;
+        q = false;
+    inv:
+        x1 > 1;
+        x2 > 1;
+    flow:
+        x1(t) = 0.005 * t * t - 0.4 * t + x1(0);
+        x2(t) = 0.005 * t * t - 0.6 * t + x2(0);
+    jump:
+        x2 < 6 =>
+          (and (not p') q' (x1' = x1) (x2' = x2));
+        (x1 < 5) =>
+          (and p' (not q') (x1' = x1) (x2' = x2));
+}
+{
+    mode:
+        p = false;
+        q = true;
+    inv:
+        x1 > 1;
+        x2 < 9;
+    flow:
+        x1(t) = 0.005 * t * t - 0.4 * t + x1(0);
+        x2(t) = 0.5 * t + 0.02 * t * t + x2(0);
+    jump:
+        x2 > 2 =>
+          (and (not p') (not q') (x1' = x1) (x2' = x2));
+        x1 < 5 =>
+          (and p' q' (x1' = x1) (x2' = x2));
+}
+{
+    mode:
+        p = true;
+        q = false;
+    inv:
+        x1 < 8;
+        x2 > 1;
+    flow:
+        x1(t) = 0.4 * t + 0.02 * t * t + x1(0);
+        x2(t) = 0.005 * t * t - 0.6 * t + x2(0);
+    jump:
+        x1 > 2 =>
+          (and (not p') (not q') (x1' = x1) (x2' = x2));
+        x2 < 6 =>
+          (and p' q' (x1' = x1) (x2' = x2));
+}
+{
+    mode:
+        p = true;
+        q = true;
+    inv:
+        x1 < 9;
+        x2 < 8;
+    flow:
+        x1(t) = 0.4 * t + 0.02 * t * t + x1(0);
+        x2(t) = 0.5 * t + 0.02 * t * t + x2(0);
+    jump:
+        x1 > 2 =>
+          (and (not p') q' (x1' = x1) (x2' = x2));
+        x2 > 2 =>
+          (and p' (not q') (x1' = x1) (x2' = x2));
+}
+init:
+(and (not(p)) not(q) (4 <= x1) (x1 <= 5) (5 <= x2) (x2 <= 6));
+
+proposition:
+
+# bound: 10, timebound: 10
+goal:
+[f1]: [][1,4] (x1 <= 6 U [2, 5] x2 >= 7); # threshold: 1.5
+[f2]: <>[0, 3] ([] [0, 4] (x2 < 4));      # threshold: 2
+[f3]: <>[2,4]((x2 <= 3) -> ([][3, 5] x2 >= 6)); # threshold: 4

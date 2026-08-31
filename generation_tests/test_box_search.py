@@ -10,6 +10,7 @@ particular benchmark happens to exercise them.
 from fractions import Fraction
 from time import sleep as _sleep
 
+import pytest
 from conftest import FakeOracle, beyond, covers, probe_at
 
 from stlmc.constraints.constraints import (
@@ -1056,21 +1057,15 @@ class TestTwoStepBackendGuard:
 class TestConstValue:
     """The numeric shapes an ``init`` bound can carry."""
 
-    def test_a_real_constant(self):
-        assert _const_value(RealVal("2.5")) == Fraction(5, 2)
-
-    def test_an_integer_constant(self):
-        assert _const_value(IntVal("3")) == Fraction(3)
-
-    def test_a_negated_constant(self):
-        # `- 0.2` parses to Neg(RealVal("0.2")).
-        assert _const_value(Neg(RealVal("0.2"))) == Fraction(-1, 5)
-
-    def test_a_variable_is_not_a_constant(self):
-        assert _const_value(Real("y")) is None
-
-    def test_a_boolean_constant_is_not_numeric(self):
-        assert _const_value(BoolVal("True")) is None
+    @pytest.mark.parametrize("node, expected", [
+        (RealVal("2.5"), Fraction(5, 2)),
+        (IntVal("3"), Fraction(3)),
+        (Neg(RealVal("0.2")), Fraction(-1, 5)),   # `- 0.2` parses to Neg(RealVal(...))
+        (Real("y"), None),                        # a variable is not a constant
+        (BoolVal("True"), None),                  # a boolean is not numeric
+    ])
+    def test_a_const_reads_as_its_value_or_none(self, node, expected):
+        assert _const_value(node) == expected
 
 
 class TestAxisBound:
@@ -1078,40 +1073,19 @@ class TestAxisBound:
 
     ids = {"y", "psi"}
 
-    def test_var_on_the_left_upper(self):
-        assert _axis_bound(Leq(Real("y"), RealVal("2.5")), self.ids) == (
-            "y", None, Fraction(5, 2))
-
-    def test_var_on_the_left_lower(self):
-        assert _axis_bound(Geq(Real("y"), RealVal("0.5")), self.ids) == (
-            "y", Fraction(1, 2), None)
-
-    def test_const_on_the_left_is_a_lower_bound(self):
-        # 0.5 <= y  is  y >= 0.5
-        assert _axis_bound(Leq(RealVal("0.5"), Real("y")), self.ids) == (
-            "y", Fraction(1, 2), None)
-
-    def test_const_on_the_left_upper(self):
-        # 3 >= y  is  y <= 3
-        assert _axis_bound(Geq(RealVal("3"), Real("y")), self.ids) == (
-            "y", None, Fraction(3))
-
-    def test_an_equality_pins_both_sides(self):
-        assert _axis_bound(Eq(Real("y"), RealVal("0")), self.ids) == (
-            "y", Fraction(0), Fraction(0))
-
-    def test_a_negated_edge(self):
-        assert _axis_bound(Leq(Neg(RealVal("0.2")), Real("y")), self.ids) == (
-            "y", Fraction(-1, 5), None)
-
-    def test_a_non_declared_variable_is_not_an_axis(self):
-        assert _axis_bound(Eq(Int("m"), RealVal("0")), self.ids) is None
-
-    def test_a_relational_term_couples_two_variables(self):
-        assert _axis_bound(Leq(Real("y"), Real("psi")), self.ids) is None
-
-    def test_a_boolean_literal_is_not_a_bound(self):
-        assert _axis_bound(Not(Bool("r")), self.ids) is None
+    @pytest.mark.parametrize("conjunct, expected", [
+        (Leq(Real("y"), RealVal("2.5")), ("y", None, Fraction(5, 2))),
+        (Geq(Real("y"), RealVal("0.5")), ("y", Fraction(1, 2), None)),
+        (Leq(RealVal("0.5"), Real("y")), ("y", Fraction(1, 2), None)),  # 0.5<=y
+        (Geq(RealVal("3"), Real("y")), ("y", None, Fraction(3))),       # 3>=y
+        (Eq(Real("y"), RealVal("0")), ("y", Fraction(0), Fraction(0))),  # eq pins
+        (Leq(Neg(RealVal("0.2")), Real("y")), ("y", Fraction(-1, 5), None)),
+        (Eq(Int("m"), RealVal("0")), None),          # not a declared axis
+        (Leq(Real("y"), Real("psi")), None),         # couples two vars
+        (Not(Bool("r")), None),                      # a boolean literal is not a bound
+    ])
+    def test_one_conjunct_reads_as_a_per_axis_bound(self, conjunct, expected):
+        assert _axis_bound(conjunct, self.ids) == expected
 
 
 class TestInitProjection:
@@ -1148,7 +1122,7 @@ class TestInitProjection:
         assert not is_box
 
     def test_a_nested_conjunction_is_flattened(self):
-        # car-linear and wat-poly nest the per-axis bounds under one inner And.
+        # some models nest the per-axis bounds under one inner And.
         init = And([And([Geq(Real("y"), RealVal("0")), Leq(Real("y"), RealVal("1"))])])
         per, is_box = _init_projection(init, self.rd)
         assert is_box and per["y_0_0"] == [Fraction(0), Fraction(1)]
@@ -1158,36 +1132,30 @@ class TestInitProjection:
         assert per["y_0_0"] == [Fraction(0), Fraction(0)]
 
 
-def test_parse_target_bounds_reads_name_lo_hi_triples():
-    assert _parse_target_bounds("y/0.5/2.5/psi/0.1/0.7") == {
-        "y_0_0": (Fraction(1, 2), Fraction(5, 2)),
-        "psi_0_0": (Fraction(1, 10), Fraction(7, 10))}
-
-
-def test_parse_target_bounds_reads_a_negative_edge():
-    assert _parse_target_bounds("r/-0.2/0.6") == {
-        "r_0_0": (Fraction(-1, 5), Fraction(3, 5))}
-
-
-def test_parse_target_bounds_of_nothing_is_empty():
-    assert _parse_target_bounds("") == {} and _parse_target_bounds(None) == {}
+@pytest.mark.parametrize("raw, expected", [
+    ("y/0.5/2.5/psi/0.1/0.7", {"y_0_0": (Fraction(1, 2), Fraction(5, 2)),
+                               "psi_0_0": (Fraction(1, 10), Fraction(7, 10))}),
+    ("r/-0.2/0.6", {"r_0_0": (Fraction(-1, 5), Fraction(3, 5))}),  # a negative edge
+    ("", {}),
+    (None, {}),
+])
+def test_parse_target_bounds(raw, expected):
+    assert _parse_target_bounds(raw) == expected
 
 
 class TestPreferLabel:
     """An interior frontier is the stronger claim; a domain edge outranks deep."""
 
-    def test_a_frontier_outranks_a_domain_edge_either_way(self):
-        assert _prefer_label(_IC_DOMAIN, _STRUCTURE_FRONTIER) == _STRUCTURE_FRONTIER
-        assert _prefer_label(_STRUCTURE_FRONTIER, _IC_DOMAIN) == _STRUCTURE_FRONTIER
-        assert (_prefer_label(_PROJECTED_DOMAIN, _STRUCTURE_FRONTIER)
-                == _STRUCTURE_FRONTIER)
-
-    def test_a_domain_edge_outranks_deep(self):
-        assert _prefer_label(_DEEP, _IC_DOMAIN) == _IC_DOMAIN
-        assert _prefer_label(_DEEP, _PROJECTED_DOMAIN) == _PROJECTED_DOMAIN
-
-    def test_equal_rank_keeps_the_current_label(self):
-        assert _prefer_label(_IC_DOMAIN, _PROJECTED_DOMAIN) == _IC_DOMAIN
+    @pytest.mark.parametrize("current, incoming, expected", [
+        (_IC_DOMAIN, _STRUCTURE_FRONTIER, _STRUCTURE_FRONTIER),   # frontier either way
+        (_STRUCTURE_FRONTIER, _IC_DOMAIN, _STRUCTURE_FRONTIER),
+        (_PROJECTED_DOMAIN, _STRUCTURE_FRONTIER, _STRUCTURE_FRONTIER),
+        (_DEEP, _IC_DOMAIN, _IC_DOMAIN),                          # edge outranks deep
+        (_DEEP, _PROJECTED_DOMAIN, _PROJECTED_DOMAIN),
+        (_IC_DOMAIN, _PROJECTED_DOMAIN, _IC_DOMAIN),              # equal rank
+    ])
+    def test_prefer_label(self, current, incoming, expected):
+        assert _prefer_label(current, incoming) == expected
 
 
 class _Model:
@@ -1198,15 +1166,15 @@ class _Model:
         self.range_dict = range_dict
 
 
-_AUV_RD = {Real("x"): (True, "0", "10", True), Real("y"): (True, "-6", "6", True),
+_BOX_RD = {Real("x"): (True, "0", "10", True), Real("y"): (True, "-6", "6", True),
            Real("psi"): (True, "-1.5", "1.5", True),
            Real("r"): (True, "-1.5", "1.5", True),
            Real("Vc"): (True, "-0.5", "0.5", True)}
 
 
-def _auv_init():
-    """The AUV initial condition: a mode pin, a pinned along-track origin, and
-    four per-axis interval bounds (one with a negated lower edge)."""
+def _boxed_init():
+    """An initial condition with a mode pin, one pinned axis, and four per-axis
+    interval bounds (one with a negated lower edge)."""
     return And([Eq(Int("m"), RealVal("0")), Eq(Real("x"), RealVal("0")),
                 Leq(RealVal("0.5"), Real("y")), Leq(Real("y"), RealVal("2.5")),
                 Leq(RealVal("0.1"), Real("psi")), Leq(Real("psi"), RealVal("0.7")),
@@ -1218,7 +1186,7 @@ class TestICPlan:
     """Axis selection, edges, and label under the two resolution paths."""
 
     def _model(self):
-        return _Model(_auv_init(), _AUV_RD)
+        return _Model(_boxed_init(), _BOX_RD)
 
     def test_auto_drops_the_axis_the_init_pins(self):
         axes, _, _ = _ic_plan(_GenConfig(), self._model())
