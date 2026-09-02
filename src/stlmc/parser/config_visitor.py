@@ -26,7 +26,7 @@ class ConfigVisitor(configVisitor):
         }
         self.section_argument_dict["z3"] = {"logic"}
         self.section_argument_dict["yices"] = {"logic"}
-        self.section_argument_dict["dreal"] = {"ode-order", "ode-step", "executable-path"}
+        self.section_argument_dict["dreal"] = {"ode-order", "executable-path"}
         self.section_argument_dict["gen"] = set()  # all [gen] params optional
 
         self.type_check_dict["common"] = {
@@ -79,7 +79,7 @@ class ConfigVisitor(configVisitor):
         self.section_mandatory_dict["common"] = {"bound", "time-bound"}
         self.section_mandatory_dict["z3"] = set()
         self.section_mandatory_dict["yices"] = set()
-        self.section_mandatory_dict["dreal"] = {"ode-step", "ode-order", "executable-path"}
+        self.section_mandatory_dict["dreal"] = {"ode-order", "executable-path"}
         # self.section_mandatory_dict["gen"] = set()
 
         self.section_selectable_dict: Dict[str, List[Set[str]]] = dict()
