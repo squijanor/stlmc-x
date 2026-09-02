@@ -113,8 +113,8 @@ class newDRealSolver(SMTSolver):
         logger = self.logger
         dreal_section = self.config.get_section("dreal")
         common_section = self.config.get_section("common")
-        ode_step = dreal_section.get_value("ode-step")
-        ode_order = dreal_section.get_value("ode-order")
+        ode_step = dreal_section.get_value("ode-step") if dreal_section.is_argument_in("ode-step") else None
+        ode_order = dreal_section.get_value("ode-order") if dreal_section.is_argument_in("ode-order") else None
         time_horizon = common_section.get_value("time-horizon")
         time_bound = float(common_section.get_value("time-bound"))
         bound = int(common_section.get_value("bound"))
