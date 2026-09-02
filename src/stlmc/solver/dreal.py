@@ -17,12 +17,6 @@ from ..solver.assignment import Assignment
 from ..tree.operations import size_of_tree
 from ..util.logger import Logger
 
-# Wall-clock ceiling for one base-checker dReal subprocess. A call that has not
-# returned by this bound is killed and its query reported Unknown, so a
-# non-terminating nonlinear query cannot stall the checker. A ceiling, not a
-# tuning value: set well above the time a decidable query takes.
-DEFAULT_QUERY_BUDGET = 300.0
-
 
 class DrealAssignment(Assignment):
     def __init__(self, _dreal_model):
@@ -153,7 +147,7 @@ class dRealSolver(ParallelSMTSolver):
 
     def _solver_args(self, exec_path, model_file_name):
         """The binary's command line for one query."""
-        args = [exec_path, model_file_name, "--short_sat", "--model"]
+        args = [exec_path, model_file_name, "--short_sat", "--model", "--ode-cache"]
         if self._precision is not None:
             args += ["--precision", repr(self._precision)]
         if self._ode_order is not None:

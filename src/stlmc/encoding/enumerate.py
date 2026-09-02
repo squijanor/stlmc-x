@@ -10,7 +10,7 @@ from ..objects.algorithm import *
 from ..objects.configuration import Configuration
 from ..objects.goal import Goal, ReachGoal
 from ..objects.model import Model
-from ..solver.dreal import dRealSolver, DrealAssignment, DEFAULT_QUERY_BUDGET
+from ..solver.dreal import dRealSolver, DrealAssignment
 from ..solver.z3 import *
 from ..util.logger import Logger
 from ..util.print import Printer
@@ -50,10 +50,8 @@ class EnumerateAlgorithm(Algorithm):
         parallel = common_section.get_value("parallel")
         core = int(common_section.get_value("parallel-core"))
 
-        # A dReal query gets a per-call wall-clock ceiling so a non-terminating
-        # nonlinear query cannot stall the checker; other backends decide on
-        # their own. solver-timeout, when set, bounds the whole check.
-        query_budget = DEFAULT_QUERY_BUDGET if isinstance(solver, dRealSolver) else None
+        # No per-query budget; solver-timeout, when set, bounds the whole check.
+        query_budget = None
         total_budget = resolve_solver_timeout(config)
 
         if isinstance(solver, dRealSolver):
