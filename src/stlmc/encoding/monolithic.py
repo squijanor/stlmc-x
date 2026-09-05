@@ -78,15 +78,21 @@ class SmtAlgorithm(Algorithm):
 
             if model.is_gen_reach_condition():
                 total_consts = And([model_const, contradiction_const, stl_const])
-                total_size = size_of_tree(total_consts)
                 reduction_dict = dict()
                 for mac in boolean_abstract_consts.children:
                     assert isinstance(mac, Eq)
                     reduction_dict[mac.left] = mac.right
                 total_consts = substitution(total_consts, reduction_dict)
             else:
-                total_consts = And([model_const, contradiction_const, stl_const, boolean_abstract_consts])
-                total_size = size_of_tree(total_consts)
+                total_consts = And([model_const, contradiction_const, stl_const])
+                reduction_dict = dict()
+                for mac in boolean_abstract_consts.children:
+                    assert isinstance(mac, Eq)
+                    reduction_dict[mac.left] = mac.right
+                total_consts = substitution(total_consts, reduction_dict)
+
+            # Size of the formula actually sent to the solver (post-substitution).
+            total_size = size_of_tree(total_consts)
 
             solver.set_time_bound(time_bound)
             result, _ = solver.solve(total_consts, model.range_dict, boolean_abstract)
