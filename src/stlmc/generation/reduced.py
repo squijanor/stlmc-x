@@ -54,7 +54,7 @@ from ..constraints.constraints import (
     Not,
     Real,
 )
-from ..constraints.operations import get_vars
+from ..constraints.operations import get_vars, substitution
 from ..encoding.enumerate import (
     assn2path,
     contradiction_gen,
@@ -299,11 +299,6 @@ class ReducedPivotSearch:
         path_real_consts = [real_dict[p] for p in p_reals if p in real_dict]
         path_const = And(list(path_bool_consts) + list(path_real_consts))
 
-        # The abstraction map: DEFINES every ODE-integral and invariant Bool as
-        # its formula. It is what the integral/invariant forall_t attach to, but
-        # on its own it asserts no initial condition, guard or reset.
-        model_abstract_const = And(
-            [Eq(v, self.boolean_abstract[v]) for v in self.boolean_abstract])
         # Reduced property path: only the core-selected forall_t. (enumerate.py:295-298)
         extra_prop_path, extra_time_path = assn2path(
             p_bools, self.sub_formulas, self.tau_max)
@@ -318,7 +313,16 @@ class ReducedPivotSearch:
         # witness is a genuine automaton run -- init, flow, invariants, guards
         # and resets are all present -- rather than a trajectory that merely
         # satisfies the surviving property path.
-        total_const = And([path_const, extra_prop_path_const, self.stl_final,
-                           extra_time_path_const, range_const,
-                           model_abstract_const, self._model_execution])
+        total_const = And([
+            path_const,
+            extra_prop_path_const,
+            self.stl_final,
+            extra_time_path_const,
+            range_const,
+            self._model_execution,
+        ])
+        # Resolve the ODE-integral and invariant Booleans by substituting their
+        # definitions across the whole query, so an inactive branch's relations
+        # stay inside their false branch instead of becoming global obligations.
+        total_const = substitution(total_const, self.boolean_abstract)
         return total_const, path_const

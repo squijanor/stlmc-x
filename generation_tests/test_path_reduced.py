@@ -354,18 +354,21 @@ def test_a_witness_missing_the_word_is_not_pooled(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-#  5. the reduced query retains the complete model execution (guards + resets)
+#  5. the reduced query inlines the abstraction Booleans, keeping guards/resets
 # --------------------------------------------------------------------------- #
 def test_the_reduced_query_carries_guards_and_resets_on_a_real_model():
-    """On a real guarded model, every reconstructed total_const contains the whole
-    model execution as a conjunct -- the jump guards and the identity resets -- so a
-    pooled witness is a run of the automaton, not just a trajectory that satisfies
-    the reduced property. The backend decides the query itself; this reads the
-    structural precondition for the no-guard-violation check.
+    """On a real guarded model, the reconstructed total_const inlines the
+    abstraction Booleans (no Boolean of the abstraction map survives) while
+    retaining every jump guard and identity reset of the model execution -- so a
+    disabled jump keeps its guard in the query and a pooled witness is a run of
+    the automaton, not just a trajectory that satisfies the reduced property. The
+    backend decides the query itself; this reads the structural precondition for
+    the no-guard-violation check.
 
     The scripted tests above cannot catch a dropped guard because their verifier
     returns a supplied verdict without evaluating model dynamics; this reads the
     actual reconstructed query on a real parsed model instead."""
+    from stlmc.constraints.operations import get_vars
     from stlmc.generation.encode import Encoder
     from stlmc.generation.reduced import ReducedPivotSearch
     from stlmc.objects.object_factory import ObjectFactory
@@ -378,9 +381,16 @@ def test_the_reduced_query_carries_guards_and_resets_on_a_real_model():
     total_const, _path, _assn = rp.propose()
 
     me = str(rp._model_execution)
-    # the whole model execution is a conjunct of the query, verbatim
-    assert me in str(total_const)
-    # ... and it carries the real jump guards and an identity reset
-    assert "<= 4" in me            # a branch guard
-    assert ">= 15" in me           # a later guard
-    assert "x1_1_0 = x1_0_t" in me  # an identity reset across a jump
+    tc = str(total_const)
+    # The jump guards and identity resets originate in the model execution and,
+    # being real atoms, survive substitution into the query -- a disabled jump
+    # keeps its guard.
+    for atom in ("<= 4", ">= 15", "x1_1_0 = x1_0_t"):  # guard, guard, reset
+        assert atom in me, atom
+        assert atom in tc, atom
+    # The abstraction Booleans are inlined by substitution, not conjoined as
+    # definitions: the map is nonempty and none of its Booleans remain in the
+    # query (a vacuous pass would otherwise hide an empty abstraction map).
+    assert rp.boolean_abstract, "no abstraction map built"
+    remaining = set(rp.boolean_abstract).intersection(get_vars(total_const))
+    assert remaining == set(), remaining
