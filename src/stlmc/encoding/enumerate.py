@@ -341,17 +341,6 @@ class EnumerateAlgorithm(Algorithm):
                     range_consts = list(map(lambda t: t[0], [model.make_range_consts(d) for d in range(0, bound + 1)]))
                     range_const = And(range_consts)
 
-                    # total_const = And([path_const, stl_acc_time, range_const, model_abstract_const])
-                    # Guard-drop fix: retain the complete model execution in the
-                    # backend query. path_const carries only the constraints the
-                    # QF_LRA minimizer kept in the core; for ODE models the flow
-                    # is opaque to that solver, so jump guards and resets (and the
-                    # initial condition) are never core-relevant and get dropped,
-                    # letting the backend witness a trajectory that jumps without
-                    # meeting a guard. Asserting the whole run -- init, flows,
-                    # invariants, guards, resets, mode transitions -- keeps the
-                    # witness a genuine automaton run; only NON-core property
-                    # subformulas are still reduced away.
                     initial_model_f, _ = model.init_consts()
                     model_execution = And([initial_model_f]
                                           + [acc_model[b] for b in range(bound)]
@@ -370,7 +359,13 @@ class EnumerateAlgorithm(Algorithm):
                     else:
                         total_const = And([path_const, extra_prop_path_const, stl_final,
                                            extra_time_path_const, range_const,
-                                           model_abstract_const, model_execution])
+                                           model_execution])
+
+                        reduction_dict = dict()
+                        for mac in model_abstract_const.children:
+                            assert isinstance(mac, Eq)
+                            reduction_dict[mac.left] = mac.right
+                        total_const = substitution(total_const, reduction_dict)
 
                     # Skip the backend for a word with no run; block the whole word.
                     _mode_seq = []
