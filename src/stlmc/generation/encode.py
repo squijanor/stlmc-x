@@ -40,12 +40,13 @@ from ..objects.model import Model
 class Encoding:
     """One depth's falsification encoding plus the data needed to read a model.
 
-    ``consts`` is ``model_const AND contradiction AND stl_const AND
-    boolean_abstract_consts`` at ``bound`` -- the same conjunction
-    ``SmtAlgorithm.run`` passes to the solver, and what the exact path hands the
-    solver directly. ``boolean_abstract`` maps the abstraction Bools to their
-    defining formulas. The delta path does not read ``consts``: it reconstructs a
-    reduced query from :meth:`Encoder.enumerate_components_at` instead.
+    ``consts`` is ``model_const AND contradiction AND stl_const`` at ``bound``
+    with the abstraction Booleans substituted by their definitions -- the same
+    query ``SmtAlgorithm.run`` passes to the solver, and what the exact path
+    hands the solver directly. ``boolean_abstract`` maps the abstraction Bools to
+    their defining formulas. The delta path does not read ``consts``: it
+    reconstructs a reduced query from :meth:`Encoder.enumerate_components_at`
+    instead.
     """
 
     consts: Formula
@@ -92,11 +93,10 @@ class StlComponents:
     config (``tau_max`` / ``delta`` are carried) and without touching the
     monolithic ``stl_const``.
 
-    ``boolean_abstract`` is a snapshot taken after building, for the
-    "retain full model execution" side of the reconstruction: the base checker's
-    ``model_abstract_const`` re-imposes EVERY entry of ``model.boolean_abstract``
-    (all ODE integrals and continuous invariants), which is what keeps the model
-    ``forall_t`` complete and avoids the base checker's guard-drop witness bug.
+    ``boolean_abstract`` is a snapshot of the abstraction map taken after
+    building. The reconstruction resolves the ODE-integral and continuous-
+    invariant Booleans against it; the guards and resets are kept by retaining
+    the full model execution in the query, not by the abstraction map.
     """
 
     bound: int
@@ -175,7 +175,10 @@ class Encoder:
         else:
             contradiction = BoolVal("True")
 
-        consts = And([model_const, contradiction, stl_const, ba_consts])
+        # Resolve the abstraction Booleans by substitution rather than conjoining
+        # their definitions, matching SmtAlgorithm and the reduced query.
+        consts = And([model_const, contradiction, stl_const])
+        consts = substitution(consts, boolean_abstract)
         return Encoding(
             consts=consts,
             boolean_abstract=boolean_abstract,
@@ -200,8 +203,8 @@ class Encoder:
         repopulates ``model.boolean_abstract`` for bounds 0..``bound``. It is
         therefore an ALTERNATIVE encode path to ``encode_at`` on the same
         ``Encoder`` -- pick one per pivot; do not interleave their model state.
-        The returned ``boolean_abstract`` is a snapshot, so the caller's
-        ``model_abstract_const`` is stable even if the model is later reset.
+        The returned ``boolean_abstract`` is a snapshot, so the abstraction map
+        the caller substitutes with is stable even if the model is later reset.
         """
         model = self.model
         # Match EnumerateAlgorithm.run: a clean abstraction map, STL condition on.
