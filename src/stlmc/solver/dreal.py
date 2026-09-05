@@ -76,7 +76,11 @@ class DrealAssignment(Assignment):
                     # we get midpoint
                     val_float = (float(lower_bound) + float(upper_bound)) / 2
                     val = str(format(val_float, "f"))
-                    new_dict[Real(var_name)] = RealVal(val)
+                    real_var = Real(var_name)
+                    new_dict[real_var] = RealVal(val)
+                    # collect per-step dwell durations for the cumulative tau map
+                    if var_name.startswith("time_") and var_name[len("time_"):].isdigit():
+                        duration_dict[real_var] = RealVal(val)
 
         time_dict = DrealAssignment._duration_dict2_time_dict(duration_dict)
         new_dict.update(time_dict)
