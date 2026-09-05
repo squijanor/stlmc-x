@@ -256,13 +256,14 @@ class TestDrealSolverArgs:
         """Upstream's arms never ask for one, so they must be unaffected."""
         solver = self._solver()
         assert solver._solver_args("dReal", "q.smt2") == [
-            "dReal", "q.smt2", "--short_sat", "--model"]
+            "dReal", "q.smt2", "--short_sat", "--model", "--ode-cache"]
 
     def test_a_configured_delta_reaches_the_binary(self):
         solver = self._solver()
         solver.set_precision(Fraction(1, 100))
         assert solver._solver_args("dReal", "q.smt2") == [
-            "dReal", "q.smt2", "--short_sat", "--model", "--precision", "0.01"]
+            "dReal", "q.smt2", "--short_sat", "--model", "--ode-cache",
+            "--precision", "0.01"]
 
     def test_the_delta_is_rendered_as_a_decimal(self):
         """dReal3's parser has no p/q literal, so an exact rational must not
@@ -277,30 +278,32 @@ class TestDrealSolverArgs:
         solver.set_precision(Fraction(1, 100))
         solver.set_precision(None)
         assert solver._solver_args("dReal", "q.smt2") == [
-            "dReal", "q.smt2", "--short_sat", "--model"]
+            "dReal", "q.smt2", "--short_sat", "--model", "--ode-cache"]
 
     def test_a_solver_that_was_not_given_ode_settings_omits_them(self):
         """The ODE flags default off, like the delta: the base checker builds
         its command line through this same method and must be unaffected."""
         solver = self._solver()
         assert solver._solver_args("dReal", "q.smt2") == [
-            "dReal", "q.smt2", "--short_sat", "--model"]
+            "dReal", "q.smt2", "--short_sat", "--model", "--ode-cache"]
 
     def test_configured_ode_settings_reach_the_binary(self):
         solver = self._solver()
         solver.set_ode_settings(5, 0.01)
         assert solver._solver_args("dReal", "q.smt2") == [
-            "dReal", "q.smt2", "--short_sat", "--model",
+            "dReal", "q.smt2", "--short_sat", "--model", "--ode-cache",
             "--ode-order", "5", "--ode-step", "0.01"]
 
     def test_each_ode_flag_is_emitted_independently(self):
         solver = self._solver()
         solver.set_ode_settings(5, None)
         assert solver._solver_args("dReal", "q.smt2") == [
-            "dReal", "q.smt2", "--short_sat", "--model", "--ode-order", "5"]
+            "dReal", "q.smt2", "--short_sat", "--model", "--ode-cache",
+            "--ode-order", "5"]
         solver.set_ode_settings(None, 0.02)
         assert solver._solver_args("dReal", "q.smt2") == [
-            "dReal", "q.smt2", "--short_sat", "--model", "--ode-step", "0.02"]
+            "dReal", "q.smt2", "--short_sat", "--model", "--ode-cache",
+            "--ode-step", "0.02"]
 
     def test_the_ode_step_is_rendered_as_a_decimal(self):
         """dReal3's parser has no p/q literal, so the step must reach the
@@ -316,7 +319,8 @@ class TestDrealSolverArgs:
         solver.set_precision(Fraction(1, 1000))
         solver.set_ode_settings(5, 0.01)
         assert solver._solver_args("dReal", "q.smt2") == [
-            "dReal", "q.smt2", "--short_sat", "--model", "--precision", "0.001",
+            "dReal", "q.smt2", "--short_sat", "--model", "--ode-cache",
+            "--precision", "0.001",
             "--ode-order", "5", "--ode-step", "0.01"]
 
     def test_ode_settings_can_be_cleared(self):
@@ -324,4 +328,4 @@ class TestDrealSolverArgs:
         solver.set_ode_settings(5, 0.01)
         solver.set_ode_settings(None, None)
         assert solver._solver_args("dReal", "q.smt2") == [
-            "dReal", "q.smt2", "--short_sat", "--model"]
+            "dReal", "q.smt2", "--short_sat", "--model", "--ode-cache"]
