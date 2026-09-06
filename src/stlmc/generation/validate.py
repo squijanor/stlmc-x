@@ -368,15 +368,20 @@ def _sat_margin(const: Any) -> float:
     assignment values, so `_num` -- the complete evaluator the flow already uses
     -- sees only constants. An Eq is satisfied at equality, so its margin is the
     negated distance between the sides; a conjunction is as satisfied as its
-    weakest term, a disjunction as its strongest.
+    weakest term, a disjunction as its strongest. A mode reset compares two
+    booleans, evaluated as equality of truth values.
     """
     if isinstance(const, (Geq, Gt)):
         return _num(const.left, [], []) - _num(const.right, [], [])
     if isinstance(const, (Leq, Lt)):
         return _num(const.right, [], []) - _num(const.left, [], [])
     if isinstance(const, Eq):
+        if isinstance(const.left, BoolVal) or isinstance(const.right, BoolVal):
+            return 1.0 if _bool(const.left) == _bool(const.right) else -1.0
         return -abs(_num(const.left, [], []) - _num(const.right, [], []))
     if isinstance(const, Neq):
+        if isinstance(const.left, BoolVal) or isinstance(const.right, BoolVal):
+            return 1.0 if _bool(const.left) != _bool(const.right) else -1.0
         return abs(_num(const.left, [], []) - _num(const.right, [], []))
     if isinstance(const, And):
         return min(_sat_margin(c) for c in const.children)
@@ -389,10 +394,28 @@ def _sat_margin(const: Any) -> float:
     raise NotSupportedError(f"cannot evaluate \"{const}\" as a predicate")
 
 
+def _bool(const: Any) -> bool:
+    """Truth value of a boolean constant."""
+    return getattr(const, "value", None) == "True"
+
+
+def _assn_raw(assn, var_id: str):
+    """The assignment's value object for a variable id, or None if it holds
+    none. Real, Int and Bool valuations share one namespace, so this reads a
+    value of any type; a numeric caller filters through `_assn_val`."""
+    return assn.get(Real(var_id))
+
+
 def _assn_val(assn, var_id: str):
-    """The assignment's value for a variable id, or None if it holds none."""
-    value = assn.get(Real(var_id))
-    return None if value is None else float(Fraction(str(value.value)))
+    """The assignment's numeric value for a variable id, or None if it holds
+    none or a non-numeric (a boolean mode encoding)."""
+    value = _assn_raw(assn, var_id)
+    if value is None:
+        return None
+    try:
+        return float(Fraction(str(value.value)))
+    except ValueError:
+        return None
 
 
 def _boundary_valuation(const, assn, bound: int, base_names, mode_ids):
@@ -401,33 +424,37 @@ def _boundary_valuation(const, assn, bound: int, base_names, mode_ids):
     A variable that is one of the model's own names is the pre-jump state, read
     at x_k_t (a mode at m_k); one carrying the primed suffix the encoding adds
     for a post-state is read at x_{k+1}_0 (a mode at m_{k+1}). Longest name
-    first, so a name that is a prefix of another does not capture it. Returns
-    None when the assignment holds none of a value the jump needs, so a jump
-    that cannot be evaluated is skipped rather than guessed.
+    first, so a name that is a prefix of another does not capture it. Each value
+    is bound as its own object, so a boolean mode reset is compared as a boolean
+    and a numeric one as a number. Returns None when the assignment holds none
+    of a value the jump needs, so a jump that cannot be evaluated is skipped
+    rather than guessed.
     """
-    valuation: Dict[Variable, RealVal] = {}
+    valuation: Dict[Variable, Any] = {}
     for var in get_vars(const):
         base = next((name for name in base_names
                      if var.id == name or var.id.startswith(name)), None)
         is_post = base is not None and var.id != base
         name = base if base is not None else var.id
         if name in mode_ids:
-            value = _assn_val(assn, f"{name}_{bound + 1}" if is_post
+            value = _assn_raw(assn, f"{name}_{bound + 1}" if is_post
                               else f"{name}_{bound}")
         else:
-            value = _assn_val(assn, f"{name}_{bound + 1}_0" if is_post
+            value = _assn_raw(assn, f"{name}_{bound + 1}_0" if is_post
                               else f"{name}_{bound}_t")
         if value is None:
             return None
-        valuation[var] = RealVal(str(value))
+        valuation[var] = value
     return valuation
 
 
 def _mode_at(assn, mode_name: str, bound: int):
-    """The mode index of a segment, from the mode variable or currentMode."""
-    value = _assn_val(assn, f"{mode_name}_{bound}")
+    """The mode index of a segment, from the currentMode counter the encoding
+    writes for every model; the mode variable is a fallback for a payload that
+    carries no counter, and is read only when it is numeric."""
+    value = _assn_val(assn, f"currentMode_{bound}")
     if value is None:
-        value = _assn_val(assn, f"currentMode_{bound}")
+        value = _assn_val(assn, f"{mode_name}_{bound}")
     return None if value is None else int(round(value))
 
 
