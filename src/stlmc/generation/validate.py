@@ -138,6 +138,17 @@ can be stable and unresolved at once -- staying inside one band says nothing
 about how close to its edge it sits -- so `resolved`, not `stable`, is what says
 a number is safe to quote.
 
+A PER-WITNESS BEHAVIOR SIGNATURE
+
+Beside the verdict each record carries a behavior signature read from the trace
+reconstruction. `jump_times` are the tau at the trace's genuine mode transitions,
+a stutter boundary dropped. The critical atom is the one whose robustness reaches
+the most negative value anywhere on the sample grid: `breach_predicate` names it,
+`peak_value` and `peak_time` are that value and its instant, and
+`breach_interval` is the contiguous span of the grid around it over which the
+atom stays negative. The breach and peak endpoints sit on the sample grid and
+carry the approximation rho(0) already does.
+
 The result is written beside the pool as `<pool>.validation.csv` rather than
 into the pool itself: the pickled payload format stays exactly as it is, and a
 consumer joins on the counterexample index.
@@ -164,6 +175,7 @@ from ..constraints.constraints import (
     Arccos,
     Arcsin,
     Arctan,
+    Bool,
     BoolVal,
     Cos,
     Div,
@@ -553,15 +565,119 @@ def _append_note(record: Dict[str, Any], message: str) -> None:
     record["note"] = f"{record['note']}; {message}" if record["note"] else message
 
 
-def validate_ce(
-    assn,
-    rest,
-    tau: float,
-    backend_delta: float,
-    formula,
-    samples: int = DEFAULT_SAMPLES,
-):
-    """Validate one counterexample. Returns (verdict, rho0, rho_min, rho_max)."""
+def _atoms(formula) -> List[Any]:
+    """The relational and boolean atoms of a formula, in first-seen order.
+
+    The temporal operators, the boolean connectives and an implication are
+    walked to their leaves; a relational predicate or a boolean proposition is a
+    leaf, and a boolean constant carries no breach and is dropped. Repeats
+    collapse on the atom's own identity.
+    """
+    out: List[Any] = []
+    seen: set = set()
+
+    def walk(node) -> None:
+        if isinstance(node, (Geq, Gt, Leq, Lt, Eq, Neq, Bool)):
+            key = hash(node)
+            if key not in seen:
+                seen.add(key)
+                out.append(node)
+            return
+        if isinstance(node, BoolVal):
+            return
+        if hasattr(node, "children"):
+            for child in node.children:
+                walk(child)
+        elif hasattr(node, "child"):
+            walk(node.child)
+        elif hasattr(node, "left") and hasattr(node, "right"):
+            walk(node.left)
+            walk(node.right)
+
+    walk(formula)
+    return out
+
+
+def _jump_times(assn, mode_var_dict) -> List[float]:
+    """The tau at each genuine mode transition of the assignment's trace.
+
+    A boundary whose mode index is unchanged is a stutter and is dropped, so the
+    list follows the reduced word rather than the raw segmentation. Empty when
+    the payload carries no mode structure.
+    """
+    mode_ids = {var.id for var in mode_var_dict.values()}
+    if not mode_ids:
+        return []
+    mode_name = next(iter(mode_ids))
+    segments = 0
+    while _mode_at(assn, mode_name, segments) is not None:
+        segments += 1
+    out: List[float] = []
+    for bound in range(segments - 1):
+        if _mode_at(assn, mode_name, bound) != _mode_at(assn, mode_name, bound + 1):
+            tau = _assn_val(assn, f"tau_{bound + 1}")
+            if tau is not None:
+                out.append(tau)
+    return out
+
+
+def _negative_span(series, index):
+    """The contiguous run of negative robustness containing `index`, as
+    (t_lo, t_hi) on the grid, or None when that sample is not negative."""
+    if not (math.isfinite(series[index][1]) and series[index][1] < 0.0):
+        return None
+    lo = index
+    while lo > 0 and math.isfinite(series[lo - 1][1]) and series[lo - 1][1] < 0.0:
+        lo -= 1
+    hi = index
+    while (
+        hi + 1 < len(series)
+        and math.isfinite(series[hi + 1][1])
+        and series[hi + 1][1] < 0.0
+    ):
+        hi += 1
+    return series[lo][0], series[hi][0]
+
+
+def _breach_peak(formula, point_samples, discrete_samples, times, time_max, dp):
+    """The critical atom of the trace and its deepest excursion.
+
+    Each atom's robustness is read over the sample grid; the critical atom is the
+    one reaching the most negative value anywhere, `peak_value` is that value and
+    `peak_time` its instant, and the breach span is the contiguous run of the
+    grid around that instant over which the atom stays negative. Returns
+    (atom, peak_value, peak_time, breach): atom None when the formula carries no
+    atom, breach None when the critical atom is never negative. The endpoints sit
+    on the sample grid, carrying the approximation rho(0) already does.
+    """
+    best_atom = best_series = best_min = None
+    for atom in _atoms(formula):
+        series = []
+        for seg in times:
+            for t in seg:
+                r = robustness(
+                    atom, point_samples, discrete_samples, t, times, time_max, dp
+                )
+                series.append((t, r))
+        finite = [r for _, r in series if math.isfinite(r)]
+        if not finite:
+            continue
+        low = min(finite)
+        if best_min is None or low < best_min:
+            best_min, best_atom, best_series = low, atom, series
+    if best_atom is None:
+        return None, None, None, None
+    peak_index = min(i for i, (_, r) in enumerate(best_series) if r == best_min)
+    peak_time = best_series[peak_index][0]
+    return best_atom, best_min, peak_time, _negative_span(best_series, peak_index)
+
+
+def _evaluate(assn, rest, tau, backend_delta, formula, samples):
+    """Reconstruct the trace once and evaluate the goal robustness over it.
+
+    Returns the four values `validate_ce` reports, followed by the
+    reconstruction: point_samples, discrete_samples, times, time_max and dp.
+    """
     point_samples, discrete_samples, times = _reconstruct(assn, rest, samples)
     time_max = max(t for seg in times for t in seg)
     dp: Dict[Tuple[Any, float], float] = {}
@@ -580,7 +696,33 @@ def validate_ce(
     if first is None:
         raise NotSupportedError("trace reconstruction produced no samples")
     rho0 = series[first][0]
-    return _classify(rho0, tau, backend_delta), rho0, min(flat), max(flat)
+    verdict = _classify(rho0, tau, backend_delta)
+    return (
+        verdict,
+        rho0,
+        min(flat),
+        max(flat),
+        point_samples,
+        discrete_samples,
+        times,
+        time_max,
+        dp,
+    )
+
+
+def validate_ce(
+    assn,
+    rest,
+    tau: float,
+    backend_delta: float,
+    formula,
+    samples: int = DEFAULT_SAMPLES,
+):
+    """Validate one counterexample. Returns (verdict, rho0, rho_min, rho_max)."""
+    verdict, rho0, lo, hi, *_ = _evaluate(
+        assn, rest, tau, backend_delta, formula, samples
+    )
+    return verdict, rho0, lo, hi
 
 
 def pool_backend_delta(payload) -> float:
@@ -645,13 +787,26 @@ def validate_pool(
             "dwell_slack": "",
             "seconds": "",
             "note": "",
+            "jump_times": "",
+            "breach_predicate": "",
+            "breach_interval": "",
+            "peak_value": "",
+            "peak_time": "",
         }
         try:
             # the visualizer prints progress from inside robustness
             with contextlib.redirect_stdout(io.StringIO()):
-                verdict, rho0, lo, hi = validate_ce(
-                    assn, rest, tau, backend_delta, formula, samples
-                )
+                (
+                    verdict,
+                    rho0,
+                    lo,
+                    hi,
+                    point_samples,
+                    discrete_samples,
+                    times,
+                    time_max,
+                    dp,
+                ) = _evaluate(assn, rest, tau, backend_delta, formula, samples)
                 if not math.isfinite(rho0):
                     # A non-finite rho(0) is not a band; `_classify` routes it
                     # to `error`. Record the value and skip the refinement,
@@ -670,6 +825,17 @@ def validate_pool(
                         rho_max=f"{hi:.12g}",
                         band_margin=f"{margin:.12g}",
                     )
+                    atom, peak_value, peak_time, breach = _breach_peak(
+                        formula, point_samples, discrete_samples, times, time_max, dp
+                    )
+                    if atom is not None:
+                        rec["breach_predicate"] = repr(atom)
+                        rec["peak_value"] = f"{peak_value:.12g}"
+                        rec["peak_time"] = f"{peak_time:.12g}"
+                        if breach is not None:
+                            rec["breach_interval"] = (
+                                f"{breach[0]:.12g} {breach[1]:.12g}"
+                            )
                     if refine:
                         fine, rho0f, _, _ = validate_ce(
                             assn,
@@ -718,6 +884,11 @@ def validate_pool(
         except Exception as exc:
             trace, guard_margin, dwell_slack = "error", None, None
             _append_note(rec, f"trace check: {type(exc).__name__}")
+        try:
+            jumps = _jump_times(assn, rest[1])
+            rec["jump_times"] = " ".join(f"{t:.12g}" for t in jumps)
+        except Exception:
+            pass
         rec["trace"] = trace
         rec["guard_margin"] = "" if guard_margin is None else f"{guard_margin:.12g}"
         rec["dwell_slack"] = "" if dwell_slack is None else f"{dwell_slack:.12g}"
