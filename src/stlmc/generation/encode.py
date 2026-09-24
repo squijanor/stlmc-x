@@ -13,10 +13,21 @@ name from the modules that provide them.
 
 from __future__ import annotations
 
+import hashlib
+import re
 from dataclasses import dataclass, field
+from fractions import Fraction
 from typing import Any
 
-from ..constraints.constraints import And, BoolVal, Constant, Formula, Not, Variable
+from ..constraints.constraints import (
+    And,
+    Bool,
+    BoolVal,
+    Constant,
+    Formula,
+    Not,
+    Variable,
+)
 from ..constraints.operations import (
     reduce_not,
     relaxing,
@@ -146,7 +157,8 @@ class Encoder:
     ) -> None:
         if isinstance(goal, ReachGoal):
             raise ValueError(
-                "Encoder supports STL falsification goals, not reachability")
+                "Encoder supports STL falsification goals, not reachability"
+            )
         self.model = model
         self.goal = goal
         self.prop_dict = prop_dict
@@ -236,7 +248,8 @@ class Encoder:
             # keys are per (module, bound) so re-assignment is idempotent.
             model_f_k, track_f_k = model.k_step_consts(b)
             model_f_k_final, model_track_f_k_final = model.k_step_consts(
-                b, is_final=True)
+                b, is_final=True
+            )
             model_consts.append(model_f_k)
             model_track_consts.append(track_f_k)
 
@@ -246,7 +259,8 @@ class Encoder:
             time_children: list[Formula] = []
             for d in range(2 * b + 1, 2 * b + 3):
                 stl_f_d, time_f_d, final_f_d = k_depth_stl_consts(
-                    sub_formulas, d, self.tau_max)
+                    sub_formulas, d, self.tau_max
+                )
                 stl_children.append(stl_f_d)
                 time_children.append(time_f_d)
                 final_f_k = final_f_d
@@ -300,3 +314,77 @@ class Encoder:
             label,
             float(self.delta),
         )
+
+
+_MODE_RE = re.compile(r"^currentMode_(\d+)$")
+
+
+def _mode_word(assn: dict[Variable, Constant]) -> list[int]:
+    """The ``currentMode_k`` integer values ordered by step ``k``."""
+    steps: list[tuple[int, int]] = []
+    for var, const in assn.items():
+        m = _MODE_RE.match(var.id)
+        if m is not None:
+            value = int(round(float(Fraction(str(const.value)))))
+            steps.append((int(m.group(1)), value))
+    steps.sort(key=lambda kv: kv[0])
+    return [value for _, value in steps]
+
+
+def _reduce_word(raw: list[int]) -> list[int]:
+    """Collapse consecutive equal modes (``0,0,1,1`` -> ``0,1``)."""
+    out: list[int] = []
+    for m in raw:
+        if not out or m != out[-1]:
+            out.append(m)
+    return out
+
+
+def _sigma(assn: dict[Variable, Constant]) -> list[list[Any]]:
+    """The Boolean-abstraction truth assignment as id-sorted ``[id, value]`` pairs."""
+    pairs = [
+        [var.id, str(const.value) == "True"]
+        for var, const in assn.items()
+        if isinstance(var, Bool)
+    ]
+    pairs.sort(key=lambda pair: pair[0])
+    return pairs
+
+
+def _structure_id(reduced_word: list[int], sigma: list[list[Any]]) -> str:
+    """A stable key over ``(reduced_word, sigma)`` for structurally equal CEs."""
+    digest = hashlib.blake2b(digest_size=16)
+    canonical = repr((tuple(reduced_word), tuple((i, v) for i, v in sigma)))
+    digest.update(canonical.encode())
+    return digest.hexdigest()
+
+
+def structure_signature_records(
+    assn_dicts: list[dict[Variable, Constant]],
+) -> list[dict[str, Any]]:
+    """One structure-signature record per pooled counterexample (payload index 11).
+
+    Each record maps ``raw_word`` (the ``currentMode_k`` word), ``reduced_word``
+    (its run-length collapse), ``sigma`` (the Boolean-abstraction assignment as
+    id-sorted ``[id, value]`` pairs), and ``structure_id`` (a stable key over
+    ``(reduced_word, sigma)``). Every field is read from the assignment dict;
+    counterexamples with equal ``(reduced_word, sigma)`` share one ``reduced_word``
+    and ``sigma`` object.
+    """
+    records: list[dict[str, Any]] = []
+    shared: dict[str, tuple[list[int], list[list[Any]]]] = {}
+    for assn in assn_dicts:
+        raw = _mode_word(assn)
+        reduced = _reduce_word(raw)
+        sigma = _sigma(assn)
+        sid = _structure_id(reduced, sigma)
+        reduced, sigma = shared.setdefault(sid, (reduced, sigma))
+        records.append(
+            {
+                "raw_word": raw,
+                "reduced_word": reduced,
+                "sigma": sigma,
+                "structure_id": sid,
+            }
+        )
+    return records
