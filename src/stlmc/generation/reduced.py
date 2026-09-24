@@ -1,44 +1,34 @@
-"""Reduced-query reconstruction for kappa_box's two-step pivot (the delta fix).
+"""Reduced-query reconstruction for a pivot search on a delta backend.
 
-The two-step pivot's ceiling is that it pins onto ``encoding.consts``, which keeps
-every quantified subformula (60 forall_t on AUV-ode f2 depth 2 = 48 property + 12
-invariant) that dReal must integrate -- the intrinsic ~615 s cost that the only
-working pin (``free``) pays per query, and that ``consts`` keeps no matter what is
-pinned on top.
+Pinning a pivot query onto ``encoding.consts`` keeps every quantified subformula
+the encoding defines, so a delta backend integrates all of them on every solve.
+The base checker (``EnumerateAlgorithm``) instead replaces ``consts``: from an
+accepted structure it minimizes to a sufficient core against the falsification
+target and reconstructs a reduced query (``assn2path`` / ``path2const`` /
+``time_path2const``) carrying only the core-selected property forall_t while
+keeping the full model execution. This module performs that reconstruction for a
+single pivot depth, so a pivot search can hand the backend the reduced query and
+grow on it instead of on ``consts``.
 
-The base checker (``EnumerateAlgorithm``) is fast on the identical encoding
-because it does not pin onto ``consts`` -- it REPLACES it: from an accepted
-structure it minimizes to a sufficient core against the falsification target and
-reconstructs a reduced query (``assn2path`` / ``path2const`` / ``time_path2const``)
-carrying ONLY the core-selected property forall_t, keeping the full model
-execution. This module ports exactly that, for a single pivot depth, so
-kappa_box's delta two-step can hand dReal the reduced query (and grow on it)
-instead of ``consts``.
+Every reconstruction primitive (``assn2path``, ``path2const``,
+``time_path2const``, ``pick_time_and_props``, ``contradiction_gen``,
+``contradiction_gen_inv``) is the base checker's, taken from
+``encoding/enumerate.py`` and specialized to one bound, driven by the
+un-collapsed components ``Encoder.enumerate_components_at`` exposes.
 
-It is a faithful transcription of the pivot-relevant half of
-``EnumerateAlgorithm.scenario_check`` (``encoding/enumerate.py``), specialized to
-one bound and driven by the un-collapsed components that
-``Encoder.enumerate_components_at`` exposes. Every reconstruction primitive
-(``assn2path``, ``path2const``, ``time_path2const``, ``pick_time_and_props``,
-``contradiction_gen``, ``contradiction_gen_inv``) is the base checker's own, so
-the reduced query this builds is the same object the base checker would hand
-dReal -- verified in the sandbox to reproduce its forall_t count.
-
-The recursive minimize target ``current_minimize_info`` (``enumerate.py:199``) is
-used here in its flattened form. Unrolling the ``unsat@k`` recursion,
-``unsat@0`` is equivalent to::
+The recursive minimize target ``current_minimize_info`` is used in flattened
+form. Unrolling the ``unsat@k`` recursion, ``unsat@0`` is equivalent to::
 
     init  AND  AND_{b<N} [ k_model_f(b) AND k_stl_f(b) AND k_stl_time_f(b) ]
               AND        [ model_f_k_final(N) AND k_stl_f(N) AND k_stl_time_f(N)
                            AND time_order(N) ]
 
-(earlier bounds use the non-final model consts and no time order; only the pivot
-bound uses the final model consts with the time order -- exactly the two
-``current_minimize_info`` shapes at ``enumerate.py:199`` and ``:341``). ``stl_final``
-is NOT part of the minimize target (the base checker adds it to the scenario
-solver and to ``total_const``, never to F). Minimizing candidate literals against
-``Not(F)`` therefore gives the same small core -- and hence the same small
-property path -- as the recursive solver, with no push/pop bookkeeping.
+Earlier bounds use the non-final model consts and no time order; only the pivot
+bound uses the final model consts with the time order. ``stl_final`` is not part
+of the minimize target -- the base checker adds it to the scenario solver and to
+``total_const``, never to F -- so minimizing candidate literals against
+``Not(F)`` yields the same core, and the same property path, as the recursive
+solver, with no push/pop bookkeeping.
 """
 
 from __future__ import annotations
@@ -73,16 +63,16 @@ UNKNOWN = "unknown"
 
 
 class ReducedPivotSearch:
-    """Base-checker reduced-query pivot search at one depth, for kappa_box.
+    """Base-checker reduced-query pivot search at one depth.
 
     Construction sets up the base checker's scenario solver at bound ``N`` (init
     consts + the accumulated next-form paths for bounds ``< N`` + the final-form
     path at ``N`` + ``stl_final`` + the contradiction clauses) and precomputes the
     flattened minimize target ``Not(F)`` and the clause set. Each :meth:`next`
     solves for one falsifying structure, minimizes it to a sufficient core,
-    reconstructs the reduced dReal query ``total_const`` and its z3-expressible
-    twin ``path_const``, and blocks that structure so the following :meth:`next`
-    yields a different one -- exactly the base checker's ``generalized_symbolic_path``
+    reconstructs the reduced query ``total_const`` and its z3-expressible twin
+    ``path_const``, and blocks that structure so the following :meth:`next` yields
+    a different one -- the base checker's ``generalized_symbolic_path``
     enumeration.
 
     ``model.boolean_abstract`` must hold the abstraction map that
@@ -137,18 +127,15 @@ class ReducedPivotSearch:
         )
         self.stl_final = components.final_f_k
 
-        # The COMPLETE model execution: the initial condition, every non-final
+        # The complete model execution -- the initial condition, every non-final
         # step's model consts (flows, invariants, jump guards and resets, mode
-        # transitions) and the final step's model consts. This is retained in
-        # full in every reconstructed query. The abstraction map alone
-        # (``boolean_abstract``) only DEFINES the ODE-integral and invariant
-        # Bools; it does not assert the initial condition or the guards and
-        # resets that make a trajectory a run of the automaton. Those live in the
-        # model consts, and the minimizer is free to drop the ones the property
-        # core does not need -- which lets dReal satisfy the reduced query with a
-        # trajectory that jumps without meeting a guard. Keeping the model
-        # execution whole closes that: the reduced query drops only NON-core
-        # PROPERTY subformulas, never a model constraint.
+        # transitions) and the final step's model consts -- retained in full in
+        # every reconstructed query. The abstraction map (``boolean_abstract``)
+        # only defines the ODE-integral and invariant Bools; the guards and
+        # resets that make a trajectory a run live in the model consts. Retaining
+        # them whole restricts the reduction to non-core property subformulas, so
+        # the minimizer cannot drop a model constraint and admit a trajectory
+        # that jumps without meeting a guard.
         self._model_execution = And(
             [components.initial_model_f]
             + [components.model_consts[b] for b in range(N)]
@@ -158,8 +145,8 @@ class ReducedPivotSearch:
         # Flattened recursive falsification target F (see module docstring).
         self._not_F = Not(And([init_conj] + nexts + [n_path_N]))
 
-        # Clause set the minimizer draws real/timing atoms from (enumerate.py:102,
-        # 211-212): the clauses of the init consts and of every structural path.
+        # Clause set the minimizer draws real/timing atoms from: the clauses of
+        # the init consts and of every structural path.
         cs = set()
         cs |= clause(init_conj)
         for b in range(N):
@@ -168,8 +155,8 @@ class ReducedPivotSearch:
         self.clause_set = cs
 
         # Scenario solver: the abstract structure z3 searches for a falsifying
-        # skeleton over (enumerate.py:94-96, 208-222). Native z3 so the model can
-        # be read back for minimize signing, like the base checker.
+        # skeleton. Native z3 so the model can be read back for minimize signing,
+        # as the base checker does.
         s = z3.SolverFor("QF_LRA")
         if seed is not None:
             s.set("random_seed", int(seed))
@@ -189,8 +176,8 @@ class ReducedPivotSearch:
         self._last_verdict = None
 
     def add_block(self, formula) -> None:
-        """Assert a persistent block into the scenario solver (kappa_box's IC
-        region blocks, or any structure to exclude)."""
+        """Assert a persistent block into the scenario solver (an IC-region
+        block, or any structure to exclude)."""
         self._scenario.add(z3Obj(formula))
 
     def last_verdict(self) -> str | None:
@@ -248,14 +235,14 @@ class ReducedPivotSearch:
         if out is None:
             return None
         total_const, path_const, assn = out
-        # Generalize: block this structure (enumerate.py:326-327) so next() moves on.
+        # Generalize: block this structure so next() moves on.
         self._scenario.add(z3Obj(Not(path_const)))
         return total_const, path_const, assn
 
     def _reconstruct(self, m, assn):
         """Minimize the candidate to a sufficient core and reconstruct the reduced
-        query -- a transcription of ``scenario_check`` lines 239-317 (STL branch),
-        using the flattened target so no recursive solver is threaded."""
+        query -- a transcription of ``scenario_check``'s STL branch, using the
+        flattened target so no recursive solver is threaded."""
         true_ = BoolVal("True")
         false_ = BoolVal("False")
 
@@ -268,7 +255,7 @@ class ReducedPivotSearch:
         s.add(z3Obj(self._not_F))
 
         # Sign the candidate's Boolean literals: true ones are tracked assumptions
-        # (their track id enters the core), false ones are hard. (enumerate.py:244-252)
+        # (their track id enters the core), false ones are hard.
         true_bool_ids: set[str] = set()
         real_set = set()
         for v in assn:
@@ -283,7 +270,7 @@ class ReducedPivotSearch:
             elif isinstance(v, (Real, Int)):
                 real_set.add(v)
 
-        # Sign the real/timing clauses touching those reals. (enumerate.py:257-266)
+        # Sign the real/timing clauses touching those reals.
         real_dict: dict[str, object] = {}
         for c in self.clause_set:
             if get_vars(c).intersection(real_set):
@@ -317,12 +304,12 @@ class ReducedPivotSearch:
         p_bools = cores.difference(p_reals)
 
         # Keep only the path-relevant time/prop Bools; drop intermediate goals.
-        p_bools = pick_time_and_props(p_bools, self.sub_formulas)  # (enumerate.py:283)
+        p_bools = pick_time_and_props(p_bools, self.sub_formulas)
         path_bool_consts = {Bool(p.replace("p@", "")) for p in p_bools}
         path_real_consts = [real_dict[p] for p in p_reals if p in real_dict]
         path_const = And(list(path_bool_consts) + list(path_real_consts))
 
-        # Reduced property path: only the core-selected forall_t. (enumerate.py:295-298)
+        # Reduced property path: only the core-selected forall_t.
         extra_prop_path, extra_time_path = assn2path(
             p_bools, self.sub_formulas, self.tau_max
         )
@@ -333,11 +320,9 @@ class ReducedPivotSearch:
             [self.model.make_range_consts(d)[0] for d in range(0, self.N + 1)]
         )
 
-        # The reduced query drops only NON-core property subformulas. The full
-        # model execution is retained in whole (self._model_execution) so the
-        # witness is a genuine automaton run -- init, flow, invariants, guards
-        # and resets are all present -- rather than a trajectory that merely
-        # satisfies the surviving property path.
+        # Retains the full model execution (self._model_execution) so the witness
+        # is a genuine automaton run, not a trajectory that only satisfies the
+        # surviving property path.
         total_const = And(
             [
                 path_const,

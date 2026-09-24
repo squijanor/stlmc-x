@@ -175,9 +175,9 @@ def test_full_coverage_still_reports_absence(tmp_path):
 
 def test_a_counterexample_at_depth_zero_is_found_and_reported(tmp_path):
     """Depth 0 unrolls to one mode segment and no jump, which is a trajectory
-    like any other. The depth set used to start at 1, so a counterexample that
-    exists only there was unreachable and an otherwise complete run reported
-    True. Its word has a single position."""
+    like any other. The depth set includes 0, so a counterexample that exists
+    only there is found and the run reports False rather than True. Its word has
+    a single position."""
     stdout, pool = run_path(tmp_path, "    depths = 0", goal="f1", bound=3)
     assert pool is not None, "fixture assumes this goal falsifies at depth 0\n" + stdout
     assert "result : False at bound 0" in stdout, stdout

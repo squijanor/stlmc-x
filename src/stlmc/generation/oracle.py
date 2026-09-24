@@ -103,9 +103,9 @@ def query_timeout(config):
             '(0, "off" or "none" disables the per-call bound)'
         ) from None
     if value != value or value in (float("inf"), float("-inf")) or value < 0:
-        # A negative value previously unbounded z3 silently (the constructor's
-        # `> 0` guard skipped the bound with no notice) and crashed the dReal
-        # path in Queue.get(timeout<0) after the subprocess had spawned.
+        # A finite, non-negative number of seconds is required: z3 needs a
+        # positive millisecond bound, and the dReal path passes the value to
+        # Queue.get, which rejects a negative timeout.
         raise ValueError(
             f'[gen] query-timeout = "{sec}": a finite number of seconds >= 0 '
             'is required (0, "off" or "none" disables the per-call bound)'
@@ -199,13 +199,9 @@ class Z3IncrementalOracle(GrowthOracle):
         if seed is not None:
             self._solver.set("random_seed", int(seed))
         if timeout is not None and float(timeout) > 0:
-            # z3 takes milliseconds and applies the bound to each check(). The
-            # default is carried by the constructor rather than injected by
-            # make_oracle, because callers also construct this class directly.
-            # A non-positive value removes the bound, matching what
-            # `query_timeout` reads from [gen] query-timeout = 0; note that a
-            # bound below z3's own resolution answers unknown for every query,
-            # including trivial ones.
+            # z3 takes milliseconds and applies the bound to each check(). A
+            # non-positive value removes the bound, matching query-timeout = 0;
+            # a bound below z3's own resolution answers unknown for every query.
             self._solver.set("timeout", max(1, int(float(timeout) * 1000)))
         self._sat_seen = False
 
@@ -440,8 +436,8 @@ class DrealReSolveOracle(GrowthOracle):
             try:
                 # budget None blocks until dReal returns (or terminate kills it).
                 msg = main_queue.get(timeout=budget)
-                # base commit puts (result, assignment, id(proc)); later upstream
-                # revisions append elapsed and an error message.
+                # The queue message is (result, assignment, ...); trailing
+                # fields vary across upstream wrapper versions and are unused.
                 result, assignment = msg[0], msg[1]
             except _q.Empty:
                 try:

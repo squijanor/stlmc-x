@@ -1,10 +1,13 @@
 """Custom counterexample generation strategies.
 
-Standalone algorithms that reuse only the STLMC falsification encoding
-(`generation.encode`), an incremental solver (`generation.oracle`) and the
-driver-contract helpers in `generation.common` -- configuration reading and
-verdict scoping. They share no mechanism and do not import one another. Selected
-by the [common] ``generation`` config value and dispatched here.
+Two strategies -- discrete path enumeration (`pathenum`) and region box
+discovery (`box`) -- built on shared generation infrastructure: the STLMC
+falsification encoding (`generation.encode`), an incremental solver
+(`generation.oracle`), the driver-contract helpers in `generation.common`
+(configuration reading and verdict scoping), the linear word feasibility filter
+(`generation.feasibility`) and the reduced-query pivot reconstruction
+(`generation.reduced`). Neither strategy imports the other. Selected by the
+[common] ``generation`` config value and dispatched here.
 """
 
 

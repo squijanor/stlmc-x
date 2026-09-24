@@ -141,10 +141,8 @@ _DEFAULT_CANDIDATE_TIMEOUT = 45.0
 
 # Default for [gen] pivot-budget (seconds for one whole candidate search) and
 # [gen] k-witness (per-axis cell budget of the lattice harvest). Named so the
-# banner and the consumers resolve the same value: the `x or DEFAULT` idiom
-# they replaced also folded a configured 0 into the default and then printed
-# the default back as if it had been set (0 is now rejected by validate_gen
-# for these keys, or meaningful and honored where it has a meaning).
+# banner and the consumers resolve the same value. A configured 0 is rejected by
+# validate_gen for these keys, or honored where it carries a meaning.
 _DEFAULT_PIVOT_BUDGET = 120.0
 _DEFAULT_K_WITNESS = 8
 _DEFAULT_LOG_EVERY = 25
@@ -509,9 +507,7 @@ def _binding_bound(attempts, refuted, undecided, undecided_seconds, elapsed):
     would only buy more expiries of, so there the bound that bit is
     ``pivot-timeout``; a search whose candidates were decided, and quickly, was
     bounded by the budget itself, and raising the per-call bound would buy it
-    strictly fewer candidates. Both directions were measured on space-ode: f2@3
-    expiring at ``pivot-timeout``, f1@2 refuting 972 candidates at ~0.1 s each
-    until ``pivot-budget`` ran out.
+    strictly fewer candidates.
 
     Returns ``(key, explanation)``.
     """
@@ -752,18 +748,16 @@ class RegionBoxDiscovery(Algorithm):
         """Two-step delta pivot on the base checker's reduced query.
 
         A monolithic pivot query hands dReal ``encoding.consts``, which keeps
-        every quantified subformula (the ~60 forall_t on AUV-ode f2 depth 2) no
-        matter what is pinned, so interval propagation is undecided at all but the
-        shallowest depths. Instead this reconstructs, per falsifying structure,
-        the base checker's reduced query -- only the core-selected property
-        forall_t plus the full model execution -- and hands THAT to dReal.
-        Because the returned oracle carries the reduced query, growth -- which
-        re-solves on the same oracle -- inherits the reduction; there is no
-        separate growth change. Sound for the same reason the base checker is:
-        the reconstruction is the base checker's own (``ReducedPivotSearch``
-        transcribes ``scenario_check``), and the full model execution is retained
-        so no jump guard is dropped (the base checker's guard-drop witness bug is
-        avoided).
+        every quantified subformula no matter what is pinned, so interval
+        propagation is undecided at all but the shallowest depths. Instead this
+        reconstructs, per falsifying structure, the base checker's reduced query
+        -- only the core-selected property forall_t plus the full model execution
+        -- and hands THAT to dReal. Because the returned oracle carries the
+        reduced query, growth -- which re-solves on the same oracle -- inherits
+        the reduction; there is no separate growth change. The reconstruction is
+        the base checker's own (``ReducedPivotSearch`` transcribes
+        ``scenario_check``), and retaining the full model execution keeps every
+        jump guard in the query.
 
         Proposal stays sequential: the scenario search is stateful and each
         returned structure is blocked so the next differs. The per-candidate
@@ -1054,14 +1048,10 @@ class RegionBoxDiscovery(Algorithm):
         encoding = encoder.encode_at(depth)
         underlying = getattr(self, "_underlying", "z3")
         if underlying != "z3":
-            # The two-step search asserts facts that are necessary conditions of
-            # the delta query rather than of the encoding -- the segment-duration
-            # timing identities and the endpoint instantiation of quantified
-            # subformulas -- and these hold only under a backend that realizes a
-            # closed segment interval and the injected clock dynamics. Guard that
-            # capability explicitly here, rather than letting the soundness of
-            # the two-step arm rest on the dispatch happening to route every
-            # non-exact backend to it.
+            # The two-step search asserts facts that hold only under a backend
+            # realizing a closed segment interval and the injected clock
+            # dynamics: the segment-duration timing identities and the endpoint
+            # instantiation of quantified subformulas. Restrict it to dreal.
             if underlying != "dreal":
                 raise ValueError(
                     "the two-step pivot search is sound only under the dreal "
@@ -1161,9 +1151,8 @@ class RegionBoxDiscovery(Algorithm):
         """
         up = wall > start
         calls = 0
-        # Probing nearer the confirmed side after an UNKNOWN. Two fractions is a
-        # deliberate cap: this runs per bisection step, and a face that needs
-        # many detours is telling you the query is too hard at this precision.
+        # After an UNKNOWN, retry nearer the confirmed side. Two detour
+        # fractions, capping the retries per bisection step.
         detours = (Fraction(1, 4), Fraction(1, 8))
 
         def falsifying_beyond(m):
@@ -1209,7 +1198,7 @@ class RegionBoxDiscovery(Algorithm):
         """Up to ``budget`` deep witnesses spread over ``[lo, hi]``.
 
         Decoupled from growth: on an exact backend witness count is forced to
-        extent/theta, which on a delta backend costs one 27 s solve each.
+        extent/theta, which on a delta backend costs one solve each.
 
         Returns ``(witnesses, requested, undecided)``. The undecided count is
         reported because a query the backend does not decide within its budget
@@ -1774,10 +1763,9 @@ class RegionBoxDiscovery(Algorithm):
                 # i of the former is index depth_offset + i of the latter -- which
                 # is what lets a marker relabel an entry an earlier box contributed.
                 depth_offset = len(pool)
-                # Both caveats on an exhaustion claim are scoped to a depth, since
-                # the structure space and its blocks are -- and so is the metrics
-                # line, which is printed under a per-depth label and previously
-                # accumulated over the whole run.
+                # Both caveats on an exhaustion claim are scoped to a depth, as
+                # are the structure space and its blocks; the metrics counters
+                # below are reset per depth so the metrics line is per-depth too.
                 self._rotated_words = 0
                 self._undecided_candidates = 0
                 self._metrics = _Counter()

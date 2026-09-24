@@ -378,7 +378,7 @@ def test_the_verify_budget_is_clamped_to_the_depth_budget(monkeypatch):
 # --------------------------------------------------------------------------- #
 def test_a_witness_missing_the_word_is_not_pooled(monkeypatch):
     """A satisfiable structure whose witness omits the location word is not pooled
-    (the pool and downstream validation need the full word), and the depth is left
+    (the pool and witness validation need the full word), and the depth is left
     unresolved rather than claiming exhaustion around a dropped witness."""
     search = _SharedPathSearch(["0", "1"])
     result, _fd, pool = _run(

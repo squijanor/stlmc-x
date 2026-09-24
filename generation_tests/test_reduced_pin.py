@@ -109,8 +109,9 @@ def test_model_execution_is_the_complete_model_not_the_abstraction():
     jump guard or reset dropped from the property core cannot let a witness
     satisfy the reduced property along a trajectory the automaton cannot produce.
     The abstraction map alone (boolean_abstract) only DEFINES the ODE-integral
-    and invariant Bools; it asserts no guard or reset, which is what let the
-    minimizer produce guard-violating witnesses before this was retained whole."""
+    and invariant Bools; it asserts no guard or reset, so retaining the model
+    execution whole is what keeps the minimizer from producing a
+    guard-violating witness."""
     me = str(_reduced(bound=2)._model_execution)
     # init + every step's model consts (guards, resets, flows live here)
     for marker in ("INIT_MODEL", "MODELNEXT_0", "MODELNEXT_1", "MODELFINAL"):

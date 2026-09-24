@@ -281,10 +281,9 @@ _GEN_KEY_CHECKS = {
     "query-timeout": _check_query_timeout,
     "keep-smt2": _check_flag01,
     # kappa_box keys carry range checks as well as parse checks, because an
-    # out-of-range value has NO defined semantics there (unlike a negative
-    # radius, which folds with a notice): theta = 0 never terminates, a
-    # zero-box budget would decide a depth in zero solver calls, a negative
-    # word-rotate blocks a word on its first refutation.
+    # out-of-range value has no defined semantics there: theta = 0 never
+    # terminates, a zero-box budget would decide a depth in zero solver calls,
+    # a negative word-rotate blocks a word on its first refutation.
     "epsilon": _check_positive_theta,
     "epsilon-relative": _check_unit_frac,
     "thin-ic": _check_nonneg_frac,

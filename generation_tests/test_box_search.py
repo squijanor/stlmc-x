@@ -2,9 +2,8 @@
 
 Everything here runs against the FakeOracle from conftest, so each expected
 value is derived from a known falsifying set rather than recorded from a solver
-run. That is deliberate: these are the properties the strategy claims, and they
-should hold independently of which backend answers the queries and of whether a
-particular benchmark happens to exercise them.
+run. The properties asserted hold independently of which backend answers the
+queries and of whether a particular model exercises them.
 """
 
 from fractions import Fraction
@@ -713,10 +712,9 @@ class _SilentPrinter:
 class TestBindingBound:
     """A budget-exhausted search must name the key that actually bounded it.
 
-    Both directions were measured: a search whose candidates expired at
-    pivot-timeout, and one that refuted 972 candidates at ~0.1 s each until
-    pivot-budget ran out. Raising the wrong one of the two makes each case
-    strictly worse.
+    Two cases: a search whose candidates expired at pivot-timeout, and one whose
+    candidates were refuted quickly until pivot-budget ran out. Raising the wrong
+    one of the two makes each case strictly worse.
     """
 
     def test_expiries_that_consumed_the_search_name_pivot_timeout(self):
@@ -906,12 +904,11 @@ class TestBlocksBindThePivotNotGrowth:
 class TestValidateGen:
     """Range checks run before the first solver call.
 
-    Each rejected value previously failed late or silently: epsilon = 0 made
-    the exact bisection non-terminating and divided by zero in the harvest; a
-    negative query-timeout unbounded z3 silently and crashed dReal after the
-    subprocess was spawned; a negative word-rotate blocked a word on its
-    first refutation; pivot budgets of 0 were folded into their defaults and
-    the folded value printed back as if configured.
+    Each check rejects a value with no defined semantics for its key: epsilon = 0
+    makes the exact bisection non-terminating and divides by zero in the harvest;
+    a negative query-timeout leaves z3 unbounded and passes a negative timeout to
+    the dReal path; a negative word-rotate blocks a word on its first refutation;
+    a pivot budget of 0 leaves no time for any candidate search.
     """
 
     @staticmethod
