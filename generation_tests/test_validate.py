@@ -20,14 +20,17 @@ from stlmc.constraints.constraints import (
     GloballyFormula,
     Int,
     Interval,
+    Leq,
     Ode,
     Real,
     RealVal,
     Sqrt,
 )
 from stlmc.generation.validate import (
+    _atoms,
     _band_margin,
     _classify,
+    _jump_times,
     _own_post_jump,
     _trace_faults,
     pool_backend_delta,
@@ -340,3 +343,120 @@ class TestTraceCheck:
         assn, rest = _trace([1], [0, 1], _const_flow())
         trace, guard_margin, dwell = _trace_faults(assn, rest[0], {}, [], 0.0)
         assert trace == "" and guard_margin is None and dwell is None
+
+
+# ---- behavior signature ---------------------------------------------------
+#
+# The behavior signature is read off the same reconstruction: `jump_times` from
+# the mode word, and the breach and peak from an atom's robustness over the
+# sample grid. A constant flow fixes each atom's robustness by segment, so every
+# expected value below is read straight off the trace, not recorded from a run.
+
+
+def _and_at(lo, hi, *atoms):
+    """[][lo,hi] (/\\ atoms) over the trace horizon."""
+    local = Interval(True, RealVal(str(lo)), True, RealVal(str(hi)))
+    horizon = Interval(True, RealVal("0"), True, RealVal("100"))
+    return GloballyFormula(local, horizon, And(list(atoms)))
+
+
+def _modes(modes, taus):
+    """currentMode and tau per segment, the input `_jump_times` reads."""
+    assn = {}
+    for k, t in enumerate(taus):
+        assn[Real(f"tau_{k}")] = RealVal(str(t))
+    for k, m in enumerate(modes):
+        assn[Real(f"currentMode_{k}")] = RealVal(str(m))
+    return assn
+
+
+class TestAtoms:
+    def test_a_temporal_formulas_predicate_is_its_atom(self):
+        atoms = _atoms(_global_at(1))
+        assert len(atoms) == 1 and isinstance(atoms[0], Geq)
+
+    def test_both_sides_of_a_conjunction_are_collected(self):
+        phi = _and_at(0, 2, Geq(Real("x"), RealVal("5")), Leq(Real("x"), RealVal("8")))
+        assert len(_atoms(phi)) == 2
+
+    def test_a_boolean_constant_carries_no_atom(self):
+        phi = _and_at(0, 2, Geq(Real("x"), RealVal("5")), BoolVal("True"))
+        assert len(_atoms(phi)) == 1
+
+    def test_a_repeated_atom_is_collapsed(self):
+        a = Geq(Real("x"), RealVal("5"))
+        assert len(_atoms(And([a, a]))) == 1
+
+
+class TestJumpTimes:
+    _MVD = {"m": Int("m")}
+
+    def test_a_mode_change_reports_its_tau(self):
+        assert _jump_times(_modes([0, 1], [0, 1, 2]), self._MVD) == [1.0]
+
+    def test_a_stutter_boundary_is_dropped(self):
+        # modes 0,0,1: the 0->0 boundary at tau_1 is a stutter; only 0->1, at
+        # tau_2, is a genuine transition.
+        assert _jump_times(_modes([0, 0, 1], [0, 1, 2, 3]), self._MVD) == [2.0]
+
+    def test_a_payload_without_mode_structure_has_no_jumps(self):
+        assert _jump_times(_modes([0, 1], [0, 1, 2]), {}) == []
+
+
+class TestBehaviorSignatureColumns:
+    """The five columns are present on every record, appended after the existing
+    ones, and computed from the atom robustness over the reconstructed grid."""
+
+    _NEW = [
+        "jump_times",
+        "breach_predicate",
+        "breach_interval",
+        "peak_value",
+        "peak_time",
+    ]
+
+    def test_the_columns_are_appended_after_the_existing_ones(self):
+        assn, rest = _trace([10, 0], [0, 1, 2], _const_flow())
+        rec = validate_pool(_payload(assn, rest, _global_at(1)), refine=False)[0]
+        assert list(rec)[-5:] == self._NEW
+
+    def test_a_falsifying_atom_reports_its_peak_and_breach(self):
+        # x >= 5 with x: 10 on [0,1], 0 on [1,2]. The atom is -5 on the second
+        # segment, which owns the jump instant 1, and +5 on the first.
+        assn, rest = _trace([10, 0], [0, 1, 2], _const_flow())
+        rec = validate_pool(
+            _payload(assn, rest, _and_at(0, 2, Geq(Real("x"), RealVal("5")))),
+            refine=False,
+        )[0]
+        assert rec["breach_predicate"] == repr(Geq(Real("x"), RealVal("5")))
+        assert rec["peak_value"] == "-5"
+        assert rec["peak_time"] == "1"
+        lo, hi = rec["breach_interval"].split()
+        assert float(lo) == 1.0 and float(hi) == 2.0
+
+    def test_a_non_violating_atom_has_a_positive_peak_and_no_breach(self):
+        # x >= 5 with x = 10 throughout: robustness is +5, never negative.
+        assn, rest = _trace([10], [0, 2], _const_flow())
+        rec = validate_pool(
+            _payload(assn, rest, _and_at(0, 2, Geq(Real("x"), RealVal("5")))),
+            refine=False,
+        )[0]
+        assert rec["peak_value"] == "5"
+        assert rec["breach_interval"] == ""
+
+    def test_the_critical_atom_is_the_deepest_over_all_atoms(self):
+        # /\(x >= 5, x <= 8) with x: 10, 0, 6. x>=5 dips to -5 on the middle
+        # segment; x<=8 dips only to -2 on the first. The critical atom is x>=5.
+        assn, rest = _trace([10, 0, 6], [0, 1, 2, 3], _const_flow())
+        phi = _and_at(0, 3, Geq(Real("x"), RealVal("5")), Leq(Real("x"), RealVal("8")))
+        rec = validate_pool(_payload(assn, rest, phi), refine=False)[0]
+        assert rec["breach_predicate"] == repr(Geq(Real("x"), RealVal("5")))
+        assert rec["peak_value"] == "-5"
+
+    @pytest.mark.filterwarnings("ignore:invalid value encountered in sqrt")
+    def test_an_error_witness_leaves_the_columns_empty(self):
+        assn, rest = _trace([1], [0, 1], _nan_flow())
+        rec = validate_pool(_payload(assn, rest, _global_at(1)), refine=False)[0]
+        assert rec["verdict"] == "error"
+        assert rec["breach_predicate"] == "" and rec["peak_value"] == ""
+        assert rec["breach_interval"] == "" and rec["peak_time"] == ""
