@@ -47,6 +47,7 @@ class FakeConfig:
 
 # =============================================================== resolution
 
+
 class TestQueryTimeoutResolution:
     """One key, one meaning, on either backend."""
 
@@ -62,8 +63,9 @@ class TestQueryTimeoutResolution:
 
     def test_zero_and_its_spellings_disable_the_bound(self):
         for spelling in ("0", "off", "none", " off "):
-            assert query_timeout(
-                FakeConfig(**{"query-timeout": spelling})) is None, spelling
+            assert query_timeout(FakeConfig(**{"query-timeout": spelling})) is None, (
+                spelling
+            )
 
     def test_a_caller_override_wins_over_the_configuration(self):
         """kappa_box bounds one candidate more tightly than a growth query."""
@@ -77,6 +79,7 @@ class TestQueryTimeoutResolution:
 
 # ============================================================== enforcement
 
+
 def semiprime_query():
     """`x * y = p * q` over the integers, with both factors non-trivial.
 
@@ -85,9 +88,15 @@ def semiprime_query():
     """
     x, y = Int("x"), Int("y")
     product = 32416187567 * 32416189381
-    return And([Geq(x, IntVal("2")), Geq(y, IntVal("2")),
-                Leq(x, IntVal(str(product))), Leq(y, IntVal(str(product))),
-                Eq(Mul(x, y), IntVal(str(product)))])
+    return And(
+        [
+            Geq(x, IntVal("2")),
+            Geq(y, IntVal("2")),
+            Leq(x, IntVal(str(product))),
+            Leq(y, IntVal(str(product))),
+            Eq(Mul(x, y), IntVal(str(product))),
+        ]
+    )
 
 
 class TestZ3Enforcement:
@@ -132,8 +141,11 @@ class TestZ3Enforcement:
     def test_the_default_lives_in_the_constructor(self):
         """kappa_box builds this class directly rather than through make_oracle,
         so a default injected by the factory would leave its queries unbounded."""
-        default = inspect.signature(
-            Z3IncrementalOracle.__init__).parameters["timeout"].default
+        default = (
+            inspect.signature(Z3IncrementalOracle.__init__)
+            .parameters["timeout"]
+            .default
+        )
         assert default == DEFAULT_QUERY_TIMEOUT
 
     def test_a_directly_constructed_oracle_enforces_its_bound(self):
@@ -144,6 +156,7 @@ class TestZ3Enforcement:
 
 
 # ============================================================== diagnostics
+
 
 class TestUnknownReason:
     """An UNRESOLVED report should say why: a per-call bound expiry reads very
@@ -162,7 +175,8 @@ class TestUnknownReason:
         def expired(consts):
             oracle.timeouts += 1
             oracle._unknown_reason = (
-                "dReal exceeded the per-call [gen] query-timeout (60s)")
+                "dReal exceeded the per-call [gen] query-timeout (60s)"
+            )
             return "Unknown", None
 
         monkeypatch.setattr(oracle, "_solve_once", expired)
@@ -171,13 +185,13 @@ class TestUnknownReason:
 
     def test_a_dreal_give_up_reports_a_generic_reason(self, monkeypatch):
         oracle = DrealReSolveOracle(FakeConfig(**{"query-timeout": "60"}))
-        monkeypatch.setattr(oracle, "_solve_once",
-                            lambda consts: ("Unknown", None))
+        monkeypatch.setattr(oracle, "_solve_once", lambda consts: ("Unknown", None))
         assert oracle.check() == UNKNOWN
         assert oracle.unknown_reason() == "dReal did not decide"
 
 
 # =========================================================== classification
+
 
 class FakeProc:
     """A finished subprocess: exit status and captured streams."""
@@ -200,8 +214,9 @@ def classify(returncode, stdout, stderr):
 
     solver = dRealSolver.__new__(dRealSolver)  # the method touches no state
     main_queue: queue.Queue = queue.Queue()
-    dRealSolver.parallel_check_sat(solver, main_queue, threading.Semaphore(0),
-                                   FakeProc(returncode, stdout, stderr))
+    dRealSolver.parallel_check_sat(
+        solver, main_queue, threading.Semaphore(0), FakeProc(returncode, stdout, stderr)
+    )
     result, assignment, _ = main_queue.get_nowait()
     return result, assignment
 
@@ -235,9 +250,11 @@ class TestDrealClassification:
     def test_a_transcript_without_a_blank_line_does_not_crash(self):
         """.remove("") raised ValueError when the transcript had none."""
         result, assignment = classify(
-            0, "Solution:\ncurrentMode_0 : Int = [1, 1]", "no-newline")
+            0, "Solution:\ncurrentMode_0 : Int = [1, 1]", "no-newline"
+        )
         assert result == "False"
         assert assignment._dreal_model
+
 
 class TestDrealSolverArgs:
     """What the binary is actually told.
@@ -256,14 +273,25 @@ class TestDrealSolverArgs:
         """Upstream's arms never ask for one, so they must be unaffected."""
         solver = self._solver()
         assert solver._solver_args("dReal", "q.smt2") == [
-            "dReal", "q.smt2", "--short_sat", "--model", "--ode-cache"]
+            "dReal",
+            "q.smt2",
+            "--short_sat",
+            "--model",
+            "--ode-cache",
+        ]
 
     def test_a_configured_delta_reaches_the_binary(self):
         solver = self._solver()
         solver.set_precision(Fraction(1, 100))
         assert solver._solver_args("dReal", "q.smt2") == [
-            "dReal", "q.smt2", "--short_sat", "--model", "--ode-cache",
-            "--precision", "0.01"]
+            "dReal",
+            "q.smt2",
+            "--short_sat",
+            "--model",
+            "--ode-cache",
+            "--precision",
+            "0.01",
+        ]
 
     def test_the_delta_is_rendered_as_a_decimal(self):
         """dReal3's parser has no p/q literal, so an exact rational must not
@@ -278,32 +306,62 @@ class TestDrealSolverArgs:
         solver.set_precision(Fraction(1, 100))
         solver.set_precision(None)
         assert solver._solver_args("dReal", "q.smt2") == [
-            "dReal", "q.smt2", "--short_sat", "--model", "--ode-cache"]
+            "dReal",
+            "q.smt2",
+            "--short_sat",
+            "--model",
+            "--ode-cache",
+        ]
 
     def test_a_solver_that_was_not_given_ode_settings_omits_them(self):
         """The ODE flags default off, like the delta: the base checker builds
         its command line through this same method and must be unaffected."""
         solver = self._solver()
         assert solver._solver_args("dReal", "q.smt2") == [
-            "dReal", "q.smt2", "--short_sat", "--model", "--ode-cache"]
+            "dReal",
+            "q.smt2",
+            "--short_sat",
+            "--model",
+            "--ode-cache",
+        ]
 
     def test_configured_ode_settings_reach_the_binary(self):
         solver = self._solver()
         solver.set_ode_settings(5, 0.01)
         assert solver._solver_args("dReal", "q.smt2") == [
-            "dReal", "q.smt2", "--short_sat", "--model", "--ode-cache",
-            "--ode-order", "5", "--ode-step", "0.01"]
+            "dReal",
+            "q.smt2",
+            "--short_sat",
+            "--model",
+            "--ode-cache",
+            "--ode-order",
+            "5",
+            "--ode-step",
+            "0.01",
+        ]
 
     def test_each_ode_flag_is_emitted_independently(self):
         solver = self._solver()
         solver.set_ode_settings(5, None)
         assert solver._solver_args("dReal", "q.smt2") == [
-            "dReal", "q.smt2", "--short_sat", "--model", "--ode-cache",
-            "--ode-order", "5"]
+            "dReal",
+            "q.smt2",
+            "--short_sat",
+            "--model",
+            "--ode-cache",
+            "--ode-order",
+            "5",
+        ]
         solver.set_ode_settings(None, 0.02)
         assert solver._solver_args("dReal", "q.smt2") == [
-            "dReal", "q.smt2", "--short_sat", "--model", "--ode-cache",
-            "--ode-step", "0.02"]
+            "dReal",
+            "q.smt2",
+            "--short_sat",
+            "--model",
+            "--ode-cache",
+            "--ode-step",
+            "0.02",
+        ]
 
     def test_the_ode_step_is_rendered_as_a_decimal(self):
         """dReal3's parser has no p/q literal, so the step must reach the
@@ -319,13 +377,27 @@ class TestDrealSolverArgs:
         solver.set_precision(Fraction(1, 1000))
         solver.set_ode_settings(5, 0.01)
         assert solver._solver_args("dReal", "q.smt2") == [
-            "dReal", "q.smt2", "--short_sat", "--model", "--ode-cache",
-            "--precision", "0.001",
-            "--ode-order", "5", "--ode-step", "0.01"]
+            "dReal",
+            "q.smt2",
+            "--short_sat",
+            "--model",
+            "--ode-cache",
+            "--precision",
+            "0.001",
+            "--ode-order",
+            "5",
+            "--ode-step",
+            "0.01",
+        ]
 
     def test_ode_settings_can_be_cleared(self):
         solver = self._solver()
         solver.set_ode_settings(5, 0.01)
         solver.set_ode_settings(None, None)
         assert solver._solver_args("dReal", "q.smt2") == [
-            "dReal", "q.smt2", "--short_sat", "--model", "--ode-cache"]
+            "dReal",
+            "q.smt2",
+            "--short_sat",
+            "--model",
+            "--ode-cache",
+        ]

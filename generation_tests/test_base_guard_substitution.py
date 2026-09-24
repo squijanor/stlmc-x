@@ -19,6 +19,7 @@ the query:
 They are binary-free (no dReal, no benchmark model); the ODE timing and the
 SAT/UNSAT agreement on the ODE benchmarks are the base A/B on the pinned set.
 """
+
 import os
 
 import pytest
@@ -72,11 +73,12 @@ def _encode_base(model_file, bound=_BOUND):
     acc_model = [model.k_step_consts(b)[0] for b in range(bound + 1)]
     model_f_k_final = model.k_step_consts(bound, is_final=True)[0]
 
-    model_execution = And([initial_model_f]
-                          + [acc_model[b] for b in range(bound)]
-                          + [model_f_k_final])
+    model_execution = And(
+        [initial_model_f] + [acc_model[b] for b in range(bound)] + [model_f_k_final]
+    )
     model_abstract_const = And(
-        [Eq(v, model.boolean_abstract[v]) for v in model.boolean_abstract])
+        [Eq(v, model.boolean_abstract[v]) for v in model.boolean_abstract]
+    )
     return model, model_execution, model_abstract_const
 
 
@@ -114,7 +116,8 @@ def test_substitution_leaves_no_abstraction_boolean(name):
 
     remaining = abstraction_bools.intersection(get_vars(total))
     assert remaining == set(), (
-        f"abstraction Booleans survived substitution: {remaining}")
+        f"abstraction Booleans survived substitution: {remaining}"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -168,9 +171,15 @@ def test_satisfiable_linear_query_agrees_across_encodings():
     b0, b1 = Bool("b0"), Bool("b1")
     definitions = {b0: Geq(x, RealVal("1")), b1: Leq(y, RealVal("2"))}
     # an Or over the abstraction Booleans, the shape of the module disjunction
-    query = And([Or([b0, b1]),
-                 Geq(x, RealVal("0")), Leq(x, RealVal("5")),
-                 Geq(y, RealVal("0")), Leq(y, RealVal("5"))])
+    query = And(
+        [
+            Or([b0, b1]),
+            Geq(x, RealVal("0")),
+            Leq(x, RealVal("5")),
+            Geq(y, RealVal("0")),
+            Leq(y, RealVal("5")),
+        ]
+    )
 
     conjoined_sat, substituted_sat = _conjoin_vs_subst(query, definitions)
     assert conjoined_sat is True

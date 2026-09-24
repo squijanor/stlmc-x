@@ -34,9 +34,15 @@ def config_with_gen(**values):
 
 class TestValidateGen:
     def test_a_well_formed_configuration_passes(self):
-        validate_gen(config_with_gen(radius="2", k_paths="8",
-                                     depths="0/2/5", query_timeout="45.5",
-                                     keep_smt2="1"))
+        validate_gen(
+            config_with_gen(
+                radius="2",
+                k_paths="8",
+                depths="0/2/5",
+                query_timeout="45.5",
+                keep_smt2="1",
+            )
+        )
 
     def test_no_gen_section_passes(self):
         validate_gen(Configuration())
@@ -47,18 +53,21 @@ class TestValidateGen:
         makes them visible. Validation must not reject them."""
         validate_gen(config_with_gen(radious="2"))
 
-    @pytest.mark.parametrize("key, value", [
-        ("radius", "big"),
-        ("radius", "2.5"),
-        ("k-paths", "2.5"),
-        ("depths", "1/x/3"),
-        ("depths", "8.5"),
-        ("query-timeout", "-5"),
-        ("query-timeout", "abc"),
-        ("query-timeout", "nan"),
-        ("query-timeout", "inf"),
-        ("keep-smt2", "true"),
-    ])
+    @pytest.mark.parametrize(
+        "key, value",
+        [
+            ("radius", "big"),
+            ("radius", "2.5"),
+            ("k-paths", "2.5"),
+            ("depths", "1/x/3"),
+            ("depths", "8.5"),
+            ("query-timeout", "-5"),
+            ("query-timeout", "abc"),
+            ("query-timeout", "nan"),
+            ("query-timeout", "inf"),
+            ("keep-smt2", "true"),
+        ],
+    )
     def test_a_malformed_value_names_the_key(self, key, value):
         config = config_with_gen(**{key.replace("-", "_"): value})
         with pytest.raises(ValueError) as err:
@@ -81,8 +90,9 @@ class TestQueryTimeoutRange:
 
     def test_spellings_of_off_still_disable_the_bound(self):
         for spelling in ("0", "off", "none"):
-            assert query_timeout(
-                config_with_gen(query_timeout=spelling)) is None, spelling
+            assert query_timeout(config_with_gen(query_timeout=spelling)) is None, (
+                spelling
+            )
 
     def test_absent_still_falls_back_to_the_default(self):
         assert query_timeout(Configuration()) == DEFAULT_QUERY_TIMEOUT
@@ -92,6 +102,7 @@ class TestQueryTimeoutRange:
         with pytest.raises(ValueError) as err:
             query_timeout(config_with_gen(query_timeout=value))
         assert "query-timeout" in str(err.value)
+
 
 def config_with_dreal(**values):
     section = Section()
@@ -113,16 +124,19 @@ class TestBackendPrecision:
     def test_an_absent_section_or_key_is_the_backend_default(self):
         assert backend_precision(None, "dreal") == DEFAULT_BACKEND_PRECISION
         assert backend_precision(Configuration(), "dreal") == DEFAULT_BACKEND_PRECISION
-        assert backend_precision(config_with_dreal(ode_order="5"),
-                                 "dreal") == DEFAULT_BACKEND_PRECISION
+        assert (
+            backend_precision(config_with_dreal(ode_order="5"), "dreal")
+            == DEFAULT_BACKEND_PRECISION
+        )
 
     def test_a_configured_value_is_exact(self):
         """Read as a Fraction, not a float: it floors a frontier located over
         exact rationals."""
         from fractions import Fraction
 
-        assert backend_precision(config_with_dreal(precision="0.01"),
-                                 "dreal") == Fraction(1, 100)
+        assert backend_precision(
+            config_with_dreal(precision="0.01"), "dreal"
+        ) == Fraction(1, 100)
 
     @pytest.mark.parametrize("value", ["0", "-0.001", "off", ""])
     def test_a_value_with_no_reading_is_a_configuration_error(self, value):
@@ -145,8 +159,10 @@ class TestOdeSettings:
         assert ode_settings(config_with_dreal(precision="0.001")) == (None, None)
 
     def test_configured_values_resolve(self):
-        assert ode_settings(config_with_dreal(ode_order="5",
-                                              ode_step="0.01")) == (5, 0.01)
+        assert ode_settings(config_with_dreal(ode_order="5", ode_step="0.01")) == (
+            5,
+            0.01,
+        )
 
     def test_each_setting_is_independent(self):
         assert ode_settings(config_with_dreal(ode_order="5")) == (5, None)

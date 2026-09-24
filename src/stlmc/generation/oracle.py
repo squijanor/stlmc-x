@@ -100,14 +100,16 @@ def query_timeout(config):
     except ValueError:
         raise ValueError(
             f'[gen] query-timeout = "{sec}": a number of seconds is required '
-            '(0, "off" or "none" disables the per-call bound)') from None
+            '(0, "off" or "none" disables the per-call bound)'
+        ) from None
     if value != value or value in (float("inf"), float("-inf")) or value < 0:
         # A negative value previously unbounded z3 silently (the constructor's
         # `> 0` guard skipped the bound with no notice) and crashed the dReal
         # path in Queue.get(timeout<0) after the subprocess had spawned.
         raise ValueError(
             f'[gen] query-timeout = "{sec}": a finite number of seconds >= 0 '
-            'is required (0, "off" or "none" disables the per-call bound)')
+            'is required (0, "off" or "none" disables the per-call bound)'
+        )
     return value
 
 
@@ -181,9 +183,13 @@ class GrowthOracle(abc.ABC):
 class Z3IncrementalOracle(GrowthOracle):
     """Raw ``z3.Solver`` with native push/pop for linear models."""
 
-    def __init__(self, logic: str = "QF_LRA", seed: int | None = None,
-                 general: bool = False,
-                 timeout: float | None = DEFAULT_QUERY_TIMEOUT) -> None:
+    def __init__(
+        self,
+        logic: str = "QF_LRA",
+        seed: int | None = None,
+        general: bool = False,
+        timeout: float | None = DEFAULT_QUERY_TIMEOUT,
+    ) -> None:
         # z3 logic name ("QF_LRA" / "QF_NRA"). SolverFor enables the incremental
         # theory solver for that logic, but it also skips most preprocessing --
         # which is fine for the arithmetic-heavy growth queries and very bad for
@@ -262,11 +268,12 @@ def _exact_decimal(f: Fraction) -> str:
     if d != 1:
         raise ValueError(
             f"no finite decimal expansion for {f}; dReal's SMT2 parser has no p/q "
-            "rational literal")
+            "rational literal"
+        )
     scale = max(twos, fives)
     if scale == 0:
         return str(f.numerator)
-    scaled = f.numerator * 10 ** scale // f.denominator
+    scaled = f.numerator * 10**scale // f.denominator
     sign = "-" if scaled < 0 else ""
     digits = str(abs(scaled)).rjust(scale + 1, "0")
     return f"{sign}{digits[:-scale]}.{digits[-scale:]}"
@@ -443,8 +450,8 @@ class DrealReSolveOracle(GrowthOracle):
                     pass
                 self.timeouts += 1
                 self._unknown_reason = (
-                    f"dReal exceeded the per-call [gen] query-timeout "
-                    f"({budget}s)")
+                    f"dReal exceeded the per-call [gen] query-timeout ({budget}s)"
+                )
                 _drop()
                 return "Unknown", None
             model = assignment.get_assignments() if result == "False" else None
@@ -522,6 +529,7 @@ def make_oracle(
 # Build Formula objects from explicit Variable objects and Python bounds; the
 # caller supplies the initial-condition variables.
 
+
 def box_constraint(bounds: BoxBounds) -> Formula:
     """``AND_i (lo_i <= x_i <= hi_i)`` over the given IC variables."""
     terms: list[Formula] = []
@@ -549,8 +557,9 @@ def box_infty(bounds: BoxBounds, drop_var: Variable, direction: int) -> Formula:
     return And(terms)
 
 
-def grow_bounds(bounds: BoxBounds, var: Variable, direction: int,
-                delta: float) -> BoxBounds:
+def grow_bounds(
+    bounds: BoxBounds, var: Variable, direction: int, delta: float
+) -> BoxBounds:
     """Return a copy of ``bounds`` with the face ``(var, direction)`` shifted
     outward by ``delta``. Does not mutate the input."""
     lo, hi = bounds[var]

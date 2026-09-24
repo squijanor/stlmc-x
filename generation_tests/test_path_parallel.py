@@ -25,6 +25,7 @@ benchmark model), and pin the properties a wider pool must preserve:
 * an infeasible word is screened before any check is dispatched;
 * a verification UNKNOWN leaves the depth unresolved rather than a false absence.
 """
+
 import os
 import random
 import re
@@ -72,10 +73,14 @@ class _Section:
 
 class _Config:
     """A [gen] section plus an optional [common] section (parallel-core)."""
+
     def __init__(self, common=None, **gen):
         self._gen = _Section({k.replace("_", "-"): v for k, v in gen.items()})
-        self._common = None if common is None else _Section(
-            {k.replace("_", "-"): v for k, v in common.items()})
+        self._common = (
+            None
+            if common is None
+            else _Section({k.replace("_", "-"): v for k, v in common.items()})
+        )
 
     def is_section_in(self, name):
         return name == "gen" or (name == "common" and self._common is not None)
@@ -96,6 +101,7 @@ class _SilentPrinter:
 class _StubEncoder:
     """enumerate_components_at returns the depth, which the scripted
     _make_reduced_search uses to select that depth's script; reset is a no-op."""
+
     model = None
 
     def enumerate_components_at(self, depth):
@@ -119,6 +125,7 @@ class _StructSearch:
     word blocks and radius balls behave exactly as on the real solver, and a
     fresh search built from replayed blocks resumes identically.
     """
+
     def __init__(self, script):
         self._script = list(script)
         self._blocks = []
@@ -171,6 +178,7 @@ class _Verifier:
     sharing a word return distinct witnesses. ``spec`` maps sid ->
     (verdict, marker); the SAT witness carries the word plus a ``wmark`` value so
     a test can tell WHICH structure was pooled."""
+
     def __init__(self, spec, delays, ledger, drop=(), wrong=None, block=()):
         self._spec = spec
         self._delays = delays
@@ -244,8 +252,13 @@ class _Verifier:
 
 
 def _new_ledger():
-    return {"lock": threading.Lock(), "checked": [], "active": 0,
-            "max_active": 0, "terminated": []}
+    return {
+        "lock": threading.Lock(),
+        "checked": [],
+        "active": 0,
+        "max_active": 0,
+        "terminated": [],
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -257,16 +270,31 @@ def _extract(pool):
     for p in pool:
         steps = sorted(
             (int(re.match(r"currentMode_(\d+)", v.id).group(1)), c.value)
-            for v, c in p.items() if re.match(r"currentMode_(\d+)$", v.id))
+            for v, c in p.items()
+            if re.match(r"currentMode_(\d+)$", v.id)
+        )
         word = ".".join(c for _, c in steps)
         mark = next((c.value for v, c in p.items() if v.id == "wmark"), None)
         out.append((word, mark))
     return out
 
 
-def _run(scripts, spec, *, workers=None, delays=None, radius=0, per_depth=64,
-         depths=(0,), drop=(), wrong=None, block=(), budget=None,
-         filter_infeasible=None, monkeypatch=None):
+def _run(
+    scripts,
+    spec,
+    *,
+    workers=None,
+    delays=None,
+    radius=0,
+    per_depth=64,
+    depths=(0,),
+    drop=(),
+    wrong=None,
+    block=(),
+    budget=None,
+    filter_infeasible=None,
+    monkeypatch=None,
+):
     if isinstance(scripts, list):
         scripts = {depths[0]: scripts}
     dmap = dict(delays or {})
@@ -277,29 +305,41 @@ def _run(scripts, spec, *, workers=None, delays=None, radius=0, per_depth=64,
 
     monkeypatch.setattr(_pathenum, "make_oracle", factory)
     if filter_infeasible is not None:
+
         class _Filter:
             def __init__(self, model, tau_max, horizon, cache=None):
                 pass
 
             def word_is_infeasible(self, depth, mode_seq):
                 return tuple(mode_seq) in filter_infeasible
+
         monkeypatch.setattr(_pathenum, "LinearWordFeasibilityFilter", _Filter)
 
     class _Alg(DiscretePathEnum):
         def _make_reduced_search(self, components, model, seed, timeout_ms):
             return _StructSearch(scripts[components])
 
-    common = (None if workers is None
-              else {"parallel": "true", "parallel-core": str(workers)})
+    common = (
+        None if workers is None else {"parallel": "true", "parallel-core": str(workers)}
+    )
     gen = {}
     if budget is not None:
         gen["pivot_budget"] = str(budget)
     cfg = _Config(common=common, **gen)
     alg = _Alg()
     result, _t, first_depth, pool = alg._run_reduced(
-        _StubEncoder(), target_depths=list(depths), per_depth=per_depth,
-        radius=radius, seed=0, logic="QF_LRA", config=cfg, logger=None,
-        printer=_SilentPrinter(), max_depth=max(depths), tau_max=1.0)
+        _StubEncoder(),
+        target_depths=list(depths),
+        per_depth=per_depth,
+        radius=radius,
+        seed=0,
+        logic="QF_LRA",
+        config=cfg,
+        logger=None,
+        printer=_SilentPrinter(),
+        max_depth=max(depths),
+        tau_max=1.0,
+    )
     return result, _extract(pool), ledger
 
 
@@ -309,26 +349,33 @@ def _run(scripts, spec, *, workers=None, delays=None, radius=0, per_depth=64,
 def _mixed_script():
     # words 0..5; some words carry two structures with distinct markers.
     return [
-        {"sid": 0, "word": (0,)},   # UNSAT
-        {"sid": 1, "word": (1,)},   # SAT   marker 11
-        {"sid": 2, "word": (1,)},   # sibling of word 1 (never reached serially)
-        {"sid": 3, "word": (2,)},   # UNKNOWN
-        {"sid": 4, "word": (3,)},   # SAT   marker 33
-        {"sid": 5, "word": (4,)},   # UNSAT
-        {"sid": 6, "word": (5,)},   # SAT   marker 55
+        {"sid": 0, "word": (0,)},  # UNSAT
+        {"sid": 1, "word": (1,)},  # SAT   marker 11
+        {"sid": 2, "word": (1,)},  # sibling of word 1 (never reached serially)
+        {"sid": 3, "word": (2,)},  # UNKNOWN
+        {"sid": 4, "word": (3,)},  # SAT   marker 33
+        {"sid": 5, "word": (4,)},  # UNSAT
+        {"sid": 6, "word": (5,)},  # SAT   marker 55
     ]
 
 
-_MIXED_SPEC = {0: (UNSAT, 0), 1: (SAT, 11), 2: (SAT, 22), 3: (UNKNOWN, 0),
-               4: (SAT, 33), 5: (UNSAT, 0), 6: (SAT, 55)}
+_MIXED_SPEC = {
+    0: (UNSAT, 0),
+    1: (SAT, 11),
+    2: (SAT, 22),
+    3: (UNKNOWN, 0),
+    4: (SAT, 33),
+    5: (UNSAT, 0),
+    6: (SAT, 55),
+}
 
 
 def test_serial_and_wide_pool_agree_on_words_order_and_witness(monkeypatch):
-    r1, p1, _ = _run(_mixed_script(), _MIXED_SPEC, workers=1,
-                     monkeypatch=monkeypatch)
+    r1, p1, _ = _run(_mixed_script(), _MIXED_SPEC, workers=1, monkeypatch=monkeypatch)
     for w in (2, 4, 8):
-        rn, pn, _ = _run(_mixed_script(), _MIXED_SPEC, workers=w,
-                         monkeypatch=monkeypatch)
+        rn, pn, _ = _run(
+            _mixed_script(), _MIXED_SPEC, workers=w, monkeypatch=monkeypatch
+        )
         assert pn == p1, (w, pn, p1)
         assert rn == r1, (w, rn, r1)
     # word 1 pooled from its earliest structure (marker 11, not 22); an UNKNOWN
@@ -340,8 +387,13 @@ def test_serial_and_wide_pool_agree_on_words_order_and_witness(monkeypatch):
 def test_completion_order_does_not_change_the_pool(monkeypatch):
     ref = None
     for delays in ({}, {1: 0.05}, {4: 0.05, 6: 0.02}, {1: 0.06, 2: 0.0, 6: 0.03}):
-        _r, p, _ = _run(_mixed_script(), _MIXED_SPEC, workers=6, delays=delays,
-                        monkeypatch=monkeypatch)
+        _r, p, _ = _run(
+            _mixed_script(),
+            _MIXED_SPEC,
+            workers=6,
+            delays=delays,
+            monkeypatch=monkeypatch,
+        )
         ref = p if ref is None else ref
         assert p == ref, (delays, p, ref)
 
@@ -368,10 +420,16 @@ _SUBST_SPEC = {0: (SAT, 100), 1: (SAT, 1), 2: (SAT, 2)}
 def test_pool_takes_the_earliest_structure_not_a_speculative_sibling(monkeypatch):
     # Delay word 0 so it completes LAST though it commits first: the siblings are
     # verified and waiting while it commits.
-    r_ser, p_ser, _ = _run(_substitution_script(), _SUBST_SPEC, workers=1,
-                           monkeypatch=monkeypatch)
-    r_par, p_par, led = _run(_substitution_script(), _SUBST_SPEC, workers=4,
-                             delays={0: 0.15}, monkeypatch=monkeypatch)
+    r_ser, p_ser, _ = _run(
+        _substitution_script(), _SUBST_SPEC, workers=1, monkeypatch=monkeypatch
+    )
+    r_par, p_par, led = _run(
+        _substitution_script(),
+        _SUBST_SPEC,
+        workers=4,
+        delays={0: 0.15},
+        monkeypatch=monkeypatch,
+    )
     assert p_ser == [("0", "100"), ("1", "1")], p_ser
     assert p_par == p_ser, p_par
     # word 1 pooled from sid 1 (marker 1), never sid 2 (marker 2).
@@ -387,8 +445,14 @@ def test_a_witness_spelling_a_different_word_is_not_pooled(monkeypatch):
     script = [{"sid": 0, "word": (0, 0)}]
     spec = {0: (SAT, 5)}
     for w in (1, 4):
-        r, p, _ = _run(script, spec, workers=w, depths=(1,),
-                       wrong={0: "0.1"}, monkeypatch=monkeypatch)
+        r, p, _ = _run(
+            script,
+            spec,
+            workers=w,
+            depths=(1,),
+            wrong={0: "0.1"},
+            monkeypatch=monkeypatch,
+        )
         assert p == [], (w, p)
         assert r == "Unknown", (w, r)
 
@@ -405,11 +469,19 @@ def test_a_radius_ball_from_a_barrier_excludes_a_speculative_word(monkeypatch):
         {"sid": 1, "word": (0, 1)},
     ]
     spec = {0: (SAT, 7), 1: (SAT, 9)}
-    r_ser, p_ser, _ = _run(script, spec, workers=1, radius=1, depths=(1,),
-                           monkeypatch=monkeypatch)
-    r_par, p_par, _ = _run(script, spec, workers=4, radius=1, depths=(1,),
-                           delays={0: 0.1}, monkeypatch=monkeypatch)
-    assert p_ser == [("0.0", "7")], p_ser   # (0,1) excluded by the ball
+    r_ser, p_ser, _ = _run(
+        script, spec, workers=1, radius=1, depths=(1,), monkeypatch=monkeypatch
+    )
+    r_par, p_par, _ = _run(
+        script,
+        spec,
+        workers=4,
+        radius=1,
+        depths=(1,),
+        delays={0: 0.1},
+        monkeypatch=monkeypatch,
+    )
+    assert p_ser == [("0.0", "7")], p_ser  # (0,1) excluded by the ball
     assert p_par == p_ser, p_par
     assert r_par == r_ser
 
@@ -424,9 +496,15 @@ def test_radius_capped_to_zero_at_depth_0_pools_every_distinct_word(monkeypatch)
     script = [{"sid": 0, "word": (0,)}, {"sid": 1, "word": (1,)}]
     spec = {0: (SAT, 5), 1: (SAT, 6)}
     for w in (1, 4):
-        _r, p, _ = _run(script, spec, workers=w, radius=1, depths=(0,),
-                        delays={0: 0.05} if w > 1 else None,
-                        monkeypatch=monkeypatch)
+        _r, p, _ = _run(
+            script,
+            spec,
+            workers=w,
+            radius=1,
+            depths=(0,),
+            delays={0: 0.05} if w > 1 else None,
+            monkeypatch=monkeypatch,
+        )
         assert p == [("0", "5"), ("1", "6")], (w, p)
 
 
@@ -437,9 +515,15 @@ def test_radius_capped_to_depth_keeps_complementary_words_eligible(monkeypatch):
     script = [{"sid": 0, "word": (0, 0)}, {"sid": 1, "word": (1, 1)}]
     spec = {0: (SAT, 8), 1: (SAT, 9)}
     for w in (1, 4):
-        _r, p, _ = _run(script, spec, workers=w, radius=2, depths=(1,),
-                        delays={0: 0.05} if w > 1 else None,
-                        monkeypatch=monkeypatch)
+        _r, p, _ = _run(
+            script,
+            spec,
+            workers=w,
+            radius=2,
+            depths=(1,),
+            delays={0: 0.05} if w > 1 else None,
+            monkeypatch=monkeypatch,
+        )
         assert sorted(p) == [("0.0", "8"), ("1.1", "9")], (w, p)
 
 
@@ -450,8 +534,9 @@ def test_multiple_sats_in_one_window_pool_in_proposal_order(monkeypatch):
     script = [{"sid": i, "word": (i,)} for i in range(4)]
     spec = {0: (SAT, 10), 1: (SAT, 20), 2: (SAT, 30), 3: (SAT, 40)}
     r_ser, p_ser, _ = _run(script, spec, workers=1, monkeypatch=monkeypatch)
-    r_par, p_par, _ = _run(script, spec, workers=8,
-                           delays={0: 0.06, 1: 0.03}, monkeypatch=monkeypatch)
+    r_par, p_par, _ = _run(
+        script, spec, workers=8, delays={0: 0.06, 1: 0.03}, monkeypatch=monkeypatch
+    )
     assert p_ser == [("0", "10"), ("1", "20"), ("2", "30"), ("3", "40")]
     assert p_par == p_ser
     assert r_par == r_ser == "False"
@@ -461,11 +546,15 @@ def test_multiple_sats_in_one_window_pool_in_proposal_order(monkeypatch):
 #  5. an infeasible word is screened before any check is dispatched
 # --------------------------------------------------------------------------- #
 def test_an_infeasible_word_is_screened_before_dispatch(monkeypatch):
-    script = [{"sid": 0, "word": (0,)}, {"sid": 1, "word": (1,)},
-              {"sid": 2, "word": (2,)}]
+    script = [
+        {"sid": 0, "word": (0,)},
+        {"sid": 1, "word": (1,)},
+        {"sid": 2, "word": (2,)},
+    ]
     spec = {0: (UNSAT, 0), 1: (SAT, 5), 2: (UNSAT, 0)}
-    _r, p, led = _run(script, spec, workers=4, filter_infeasible={(1,)},
-                      monkeypatch=monkeypatch)
+    _r, p, led = _run(
+        script, spec, workers=4, filter_infeasible={(1,)}, monkeypatch=monkeypatch
+    )
     # word 1 is screened out: it reaches no verifier and is not pooled.
     assert p == []
     assert 1 not in led["checked"]
@@ -496,9 +585,14 @@ def test_a_fully_refuted_space_is_absence(monkeypatch):
 # --------------------------------------------------------------------------- #
 def test_the_pipeline_overlaps_checks(monkeypatch):
     script = [{"sid": i, "word": (i,)} for i in range(8)]
-    spec = {i: (UNSAT, 0) for i in range(8)}   # full exhaustion, no pool
-    _r, p, led = _run(script, spec, workers=4, delays={i: 0.03 for i in range(8)},
-                      monkeypatch=monkeypatch)
+    spec = {i: (UNSAT, 0) for i in range(8)}  # full exhaustion, no pool
+    _r, p, led = _run(
+        script,
+        spec,
+        workers=4,
+        delays={i: 0.03 for i in range(8)},
+        monkeypatch=monkeypatch,
+    )
     assert p == []
     assert led["max_active"] >= 2, led["max_active"]
     assert set(led["checked"]) == set(range(8))
@@ -510,13 +604,15 @@ def test_the_pipeline_overlaps_checks(monkeypatch):
 def test_the_k_paths_budget_caps_the_pool_under_a_wide_pool(monkeypatch):
     script = [{"sid": i, "word": (i,)} for i in range(6)]
     spec = {i: (SAT, i * 10) for i in range(6)}
-    r_ser, p_ser, _ = _run(script, spec, workers=1, per_depth=2,
-                           monkeypatch=monkeypatch)
-    r_par, p_par, _ = _run(script, spec, workers=8, per_depth=2,
-                           delays={0: 0.05}, monkeypatch=monkeypatch)
+    r_ser, p_ser, _ = _run(
+        script, spec, workers=1, per_depth=2, monkeypatch=monkeypatch
+    )
+    r_par, p_par, _ = _run(
+        script, spec, workers=8, per_depth=2, delays={0: 0.05}, monkeypatch=monkeypatch
+    )
     assert p_ser == [("0", "0"), ("1", "10")]
     assert p_par == p_ser
-    assert r_ser == r_par   # subset of depths decided -> Unknown
+    assert r_ser == r_par  # subset of depths decided -> Unknown
 
 
 def test_a_cap_terminates_an_in_flight_check_and_returns_promptly(monkeypatch):
@@ -529,13 +625,20 @@ def test_a_cap_terminates_an_in_flight_check_and_returns_promptly(monkeypatch):
     script = [{"sid": 0, "word": (0,)}, {"sid": 1, "word": (1,)}]
     spec = {0: (SAT, 7), 1: (SAT, 8)}
     t0 = time.perf_counter()
-    r, p, led = _run(script, spec, workers=2, per_depth=1, block={1},
-                     delays={0: 0.1}, monkeypatch=monkeypatch)
+    r, p, led = _run(
+        script,
+        spec,
+        workers=2,
+        per_depth=1,
+        block={1},
+        delays={0: 0.1},
+        monkeypatch=monkeypatch,
+    )
     elapsed = time.perf_counter() - t0
-    assert p == [("0", "7")]            # sid 0 pooled, cap met
-    assert 1 in led["terminated"]       # sid 1's in-flight check was killed
-    assert 0 not in led["terminated"]   # sid 0 completed on its own
-    assert elapsed < 5.0                # not held for sid 1's safety timeout
+    assert p == [("0", "7")]  # sid 0 pooled, cap met
+    assert 1 in led["terminated"]  # sid 1's in-flight check was killed
+    assert 0 not in led["terminated"]  # sid 0 completed on its own
+    assert elapsed < 5.0  # not held for sid 1's safety timeout
 
 
 def test_an_interrupt_mid_run_terminates_in_flight_checks(monkeypatch):
@@ -560,7 +663,7 @@ def test_an_interrupt_mid_run_terminates_in_flight_checks(monkeypatch):
         def propose(self):
             self._calls += 1
             if self._calls == 1:
-                return super().propose()   # sid 0 dispatched; its check blocks
+                return super().propose()  # sid 0 dispatched; its check blocks
             # Interrupt only once sid 0 is registered live, so the unwinding
             # cleanup has an in-flight check to terminate.
             t0 = time.perf_counter()
@@ -576,10 +679,19 @@ def test_an_interrupt_mid_run_terminates_in_flight_checks(monkeypatch):
     alg = _Alg()
     with pytest.raises(KeyboardInterrupt):
         alg._run_reduced(
-            _StubEncoder(), target_depths=[0], per_depth=64, radius=0, seed=0,
-            logic="QF_LRA", config=cfg, logger=None, printer=_SilentPrinter(),
-            max_depth=0, tau_max=1.0)
-    assert 0 in ledger["terminated"]   # the in-flight check was killed on unwind
+            _StubEncoder(),
+            target_depths=[0],
+            per_depth=64,
+            radius=0,
+            seed=0,
+            logic="QF_LRA",
+            config=cfg,
+            logger=None,
+            printer=_SilentPrinter(),
+            max_depth=0,
+            tau_max=1.0,
+        )
+    assert 0 in ledger["terminated"]  # the in-flight check was killed on unwind
 
 
 # --------------------------------------------------------------------------- #
@@ -594,7 +706,7 @@ def test_k_paths_zero_poses_no_query_and_terminates(monkeypatch):
     r, p, led = _run(script, spec, workers=4, per_depth=0, monkeypatch=monkeypatch)
     assert p == []
     assert r == "Unknown"
-    assert led["checked"] == []   # no candidate ever verified
+    assert led["checked"] == []  # no candidate ever verified
 
 
 def test_multi_depth_serial_and_wide_agree(monkeypatch):
@@ -603,10 +715,15 @@ def test_multi_depth_serial_and_wide_agree(monkeypatch):
         1: [{"sid": 2, "word": (0, 0)}, {"sid": 3, "word": (0, 1)}],
     }
     spec = {0: (SAT, 1), 1: (UNSAT, 0), 2: (UNSAT, 0), 3: (SAT, 4)}
-    r1, p1, _ = _run(scripts, spec, workers=1, depths=(0, 1),
-                     monkeypatch=monkeypatch)
-    rn, pn, _ = _run(scripts, spec, workers=6, depths=(0, 1),
-                     delays={0: 0.04, 3: 0.02}, monkeypatch=monkeypatch)
+    r1, p1, _ = _run(scripts, spec, workers=1, depths=(0, 1), monkeypatch=monkeypatch)
+    rn, pn, _ = _run(
+        scripts,
+        spec,
+        workers=6,
+        depths=(0, 1),
+        delays={0: 0.04, 3: 0.02},
+        monkeypatch=monkeypatch,
+    )
     assert pn == p1, (pn, p1)
     assert rn == r1
 
@@ -631,11 +748,17 @@ def test_adversarial_determinism_stress(monkeypatch):
     rng = random.Random(20260830)
     for _ in range(60):
         script, spec, delays = _random_case(rng)
-        r_ref, p_ref, _ = _run([dict(s) for s in script], spec, workers=1,
-                               monkeypatch=monkeypatch)
+        r_ref, p_ref, _ = _run(
+            [dict(s) for s in script], spec, workers=1, monkeypatch=monkeypatch
+        )
         for w in (2, 3, 5, 8):
-            r, p, _ = _run([dict(s) for s in script], spec, workers=w,
-                           delays=delays, monkeypatch=monkeypatch)
+            r, p, _ = _run(
+                [dict(s) for s in script],
+                spec,
+                workers=w,
+                delays=delays,
+                monkeypatch=monkeypatch,
+            )
             assert p == p_ref, (w, script, spec, p, p_ref)
             assert r == r_ref, (w, script, spec, r, r_ref)
 

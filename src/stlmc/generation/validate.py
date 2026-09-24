@@ -207,9 +207,10 @@ REFINE_FACTOR = 4
 
 # ---------------------------------------------------------------- evaluation
 
+
 @singledispatch
 def _num(const: Any, vec, var_list: List[Variable]) -> float:
-    raise NotSupportedError(f"cannot evaluate \"{const}\" numerically")
+    raise NotSupportedError(f'cannot evaluate "{const}" numerically')
 
 
 def _register(cls, fn):
@@ -237,8 +238,11 @@ _register(Arctan, lambda c, vec, vs: numpy.arctan(_num(c.child, vec, vs)))
 
 def _ode_samples(time_samples: List[float], dynamic, initial_values: List[float]):
     """Integrate one segment. Same call as the visualizer's, complete evaluator."""
-    res = odeint(lambda z, t: [_num(dyn, z, dynamic.vars) for dyn in dynamic.exps],
-                 initial_values, time_samples)
+    res = odeint(
+        lambda z, t: [_num(dyn, z, dynamic.vars) for dyn in dynamic.exps],
+        initial_values,
+        time_samples,
+    )
     return {v: [row[dynamic.vars.index(v)] for row in res] for v in dynamic.vars}
 
 
@@ -259,9 +263,11 @@ def _time_samples(projector: Projector, samples: int) -> List[List[float]]:
     return out
 
 
-def _own_post_jump(times: List[List[float]],
-                   point_samples: Dict[Variable, List[List[float]]],
-                   discrete_samples: Dict[Variable, List[List[float]]]) -> None:
+def _own_post_jump(
+    times: List[List[float]],
+    point_samples: Dict[Variable, List[List[float]]],
+    discrete_samples: Dict[Variable, List[List[float]]],
+) -> None:
     """Give each variable point to the segment that begins at it.
 
     Every segment but the last is restricted to the half-open interval
@@ -274,8 +280,9 @@ def _own_post_jump(times: List[List[float]],
     `times`, `point_samples` and `discrete_samples` are edited in place, in
     lockstep by segment index.
     """
-    boundaries = [times[i + 1][0] if times[i + 1] else None
-                  for i in range(len(times) - 1)]
+    boundaries = [
+        times[i + 1][0] if times[i + 1] else None for i in range(len(times) - 1)
+    ]
     for i, boundary in enumerate(boundaries):
         if boundary is None:
             continue
@@ -288,6 +295,7 @@ def _own_post_jump(times: List[List[float]],
 
 
 # ---------------------------------------------------------------- validation
+
 
 def _reconstruct(assn, rest, samples: int):
     """Trace reconstruction, mirroring Visualizer.generate_data."""
@@ -391,7 +399,7 @@ def _sat_margin(const: Any) -> float:
         return -_sat_margin(const.child)
     if isinstance(const, BoolVal):
         return 1.0 if const.value == "True" else -1.0
-    raise NotSupportedError(f"cannot evaluate \"{const}\" as a predicate")
+    raise NotSupportedError(f'cannot evaluate "{const}" as a predicate')
 
 
 def _bool(const: Any) -> bool:
@@ -432,16 +440,20 @@ def _boundary_valuation(const, assn, bound: int, base_names, mode_ids):
     """
     valuation: Dict[Variable, Any] = {}
     for var in get_vars(const):
-        base = next((name for name in base_names
-                     if var.id == name or var.id.startswith(name)), None)
+        base = next(
+            (name for name in base_names if var.id == name or var.id.startswith(name)),
+            None,
+        )
         is_post = base is not None and var.id != base
         name = base if base is not None else var.id
         if name in mode_ids:
-            value = _assn_raw(assn, f"{name}_{bound + 1}" if is_post
-                              else f"{name}_{bound}")
+            value = _assn_raw(
+                assn, f"{name}_{bound + 1}" if is_post else f"{name}_{bound}"
+            )
         else:
-            value = _assn_raw(assn, f"{name}_{bound + 1}_0" if is_post
-                              else f"{name}_{bound}_t")
+            value = _assn_raw(
+                assn, f"{name}_{bound + 1}_0" if is_post else f"{name}_{bound}_t"
+            )
         if value is None:
             return None
         valuation[var] = value
@@ -470,8 +482,9 @@ def _trace_faults(assn, modules, mode_var_dict, range_dict, backend_delta):
     mode_ids = {var.id for var in mode_var_dict.values()}
     if not mode_ids or not any(module.get("jump") for module in modules):
         return "", None, None
-    base_names = sorted({var.id for var in range_dict} | mode_ids,
-                        key=len, reverse=True)
+    base_names = sorted(
+        {var.id for var in range_dict} | mode_ids, key=len, reverse=True
+    )
     mode_name = next(iter(mode_ids))
     slack = max(backend_delta, _TRACE_EPS)
 
@@ -489,13 +502,13 @@ def _trace_faults(assn, modules, mode_var_dict, range_dict, backend_delta):
 
         explaining_guards = []
         for guard, reset in modules[pre].get("jump", {}).items():
-            valuation = _boundary_valuation(And([guard, reset]), assn, bound,
-                                            base_names, mode_ids)
+            valuation = _boundary_valuation(
+                And([guard, reset]), assn, bound, base_names, mode_ids
+            )
             if valuation is None:
                 continue
             if _sat_margin(substitution(reset, valuation)) >= -slack:
-                explaining_guards.append(
-                    _sat_margin(substitution(guard, valuation)))
+                explaining_guards.append(_sat_margin(substitution(guard, valuation)))
 
         dwell = _assn_val(assn, f"time_{bound}")
         tau_k = _assn_val(assn, f"tau_{bound}")
@@ -540,15 +553,25 @@ def _append_note(record: Dict[str, Any], message: str) -> None:
     record["note"] = f"{record['note']}; {message}" if record["note"] else message
 
 
-def validate_ce(assn, rest, tau: float, backend_delta: float, formula,
-                samples: int = DEFAULT_SAMPLES):
+def validate_ce(
+    assn,
+    rest,
+    tau: float,
+    backend_delta: float,
+    formula,
+    samples: int = DEFAULT_SAMPLES,
+):
     """Validate one counterexample. Returns (verdict, rho0, rho_min, rho_max)."""
     point_samples, discrete_samples, times = _reconstruct(assn, rest, samples)
     time_max = max(t for seg in times for t in seg)
     dp: Dict[Tuple[Any, float], float] = {}
-    series = [[robustness(formula, point_samples, discrete_samples, t, times,
-                          time_max, dp)
-               for t in seg] for seg in times]
+    series = [
+        [
+            robustness(formula, point_samples, discrete_samples, t, times, time_max, dp)
+            for t in seg
+        ]
+        for seg in times
+    ]
     flat = [x for seg in series for x in seg]
     # rho(0) at the trace's initial instant, which post-jump ownership assigns
     # to the first segment that carries a sample: a zero-duration leading
@@ -570,9 +593,14 @@ def pool_backend_delta(payload) -> float:
     return float(payload[10]) if len(payload) > 10 else 0.0
 
 
-def validate_pool(payload, samples: int = DEFAULT_SAMPLES, refine: bool = True,
-                  tau: float = None, backend_delta: float = None,
-                  progress=None) -> List[Dict[str, Any]]:
+def validate_pool(
+    payload,
+    samples: int = DEFAULT_SAMPLES,
+    refine: bool = True,
+    tau: float = None,
+    backend_delta: float = None,
+    progress=None,
+) -> List[Dict[str, Any]]:
     """Validate every counterexample in a pool payload.
 
     `payload` is the unpickled `.counterexamples` tuple. Returns one record
@@ -587,8 +615,9 @@ def validate_pool(payload, samples: int = DEFAULT_SAMPLES, refine: bool = True,
     assns = payload[0]
     rest = list(payload[1:9])
     tau = float(payload[8]) if tau is None else float(tau)
-    backend_delta = (pool_backend_delta(payload) if backend_delta is None
-                     else float(backend_delta))
+    backend_delta = (
+        pool_backend_delta(payload) if backend_delta is None else float(backend_delta)
+    )
     labels = payload[9] if len(payload) > 9 else [""] * len(assns)
     formula = substitution(payload[6], payload[5])
 
@@ -620,24 +649,36 @@ def validate_pool(payload, samples: int = DEFAULT_SAMPLES, refine: bool = True,
         try:
             # the visualizer prints progress from inside robustness
             with contextlib.redirect_stdout(io.StringIO()):
-                verdict, rho0, lo, hi = validate_ce(assn, rest, tau,
-                                                    backend_delta, formula,
-                                                    samples)
+                verdict, rho0, lo, hi = validate_ce(
+                    assn, rest, tau, backend_delta, formula, samples
+                )
                 if not math.isfinite(rho0):
                     # A non-finite rho(0) is not a band; `_classify` routes it
                     # to `error`. Record the value and skip the refinement,
                     # whose band comparisons a non-finite number cannot inform.
-                    rec.update(verdict="error", rho0=f"{rho0:.12g}",
-                               note=f"non-finite rho(0): {rho0:.12g}")
+                    rec.update(
+                        verdict="error",
+                        rho0=f"{rho0:.12g}",
+                        note=f"non-finite rho(0): {rho0:.12g}",
+                    )
                 else:
                     margin = _band_margin(rho0, tau, backend_delta)
-                    rec.update(verdict=verdict, rho0=f"{rho0:.12g}",
-                               rho_min=f"{lo:.12g}", rho_max=f"{hi:.12g}",
-                               band_margin=f"{margin:.12g}")
+                    rec.update(
+                        verdict=verdict,
+                        rho0=f"{rho0:.12g}",
+                        rho_min=f"{lo:.12g}",
+                        rho_max=f"{hi:.12g}",
+                        band_margin=f"{margin:.12g}",
+                    )
                     if refine:
                         fine, rho0f, _, _ = validate_ce(
-                            assn, rest, tau, backend_delta, formula,
-                            samples * REFINE_FACTOR)
+                            assn,
+                            rest,
+                            tau,
+                            backend_delta,
+                            formula,
+                            samples * REFINE_FACTOR,
+                        )
                         shift = abs(rho0f - rho0)
                         rec["refined_verdict"] = fine
                         rec["rho0_refined"] = f"{rho0f:.12g}"
@@ -649,18 +690,22 @@ def validate_pool(payload, samples: int = DEFAULT_SAMPLES, refine: bool = True,
                         # moved when the sampling was refined. A verdict can be
                         # `stable` and unresolved at once -- staying inside one
                         # band says nothing about how close to its edge it sits.
-                        rec["resolved"] = ("yes"
-                                           if margin > max(backend_delta, shift)
-                                           else "no")
+                        rec["resolved"] = (
+                            "yes" if margin > max(backend_delta, shift) else "no"
+                        )
                         if fine != verdict:
-                            rec["note"] = (f"sampling-sensitive: rho(0) "
-                                           f"{rho0f:.12g} at {REFINE_FACTOR}x")
+                            rec["note"] = (
+                                f"sampling-sensitive: rho(0) "
+                                f"{rho0f:.12g} at {REFINE_FACTOR}x"
+                            )
                         elif rec["resolved"] == "no":
-                            rec["note"] = (f"edge-resident: rho(0) is {margin:.3g} "
-                                           f"from a band edge, against a sampling "
-                                           f"shift of {shift:.3g} and a backend "
-                                           f"delta of {backend_delta:.3g}")
-        except Exception as exc:            # a reconstruction failure is a result
+                            rec["note"] = (
+                                f"edge-resident: rho(0) is {margin:.3g} "
+                                f"from a band edge, against a sampling "
+                                f"shift of {shift:.3g} and a backend "
+                                f"delta of {backend_delta:.3g}"
+                            )
+        except Exception as exc:  # a reconstruction failure is a result
             rec["verdict"] = "error"
             rec["note"] = f"{type(exc).__name__}: {str(exc)[:120]}"
         # The trace check is orthogonal to the robustness verdict and reads the
@@ -668,22 +713,26 @@ def validate_pool(payload, samples: int = DEFAULT_SAMPLES, refine: bool = True,
         # succeeded. On a payload without mode or jump structure it returns "".
         try:
             trace, guard_margin, dwell_slack = _trace_faults(
-                assn, rest[0], rest[1], rest[3], backend_delta)
+                assn, rest[0], rest[1], rest[3], backend_delta
+            )
         except Exception as exc:
             trace, guard_margin, dwell_slack = "error", None, None
             _append_note(rec, f"trace check: {type(exc).__name__}")
         rec["trace"] = trace
-        rec["guard_margin"] = ("" if guard_margin is None
-                               else f"{guard_margin:.12g}")
+        rec["guard_margin"] = "" if guard_margin is None else f"{guard_margin:.12g}"
         rec["dwell_slack"] = "" if dwell_slack is None else f"{dwell_slack:.12g}"
         if trace == "guard-violating":
-            _append_note(rec, f"guard violated by {abs(guard_margin):.3g}: the "
-                              "witness is not a trace the automaton can produce")
+            _append_note(
+                rec,
+                f"guard violated by {abs(guard_margin):.3g}: the "
+                "witness is not a trace the automaton can produce",
+            )
         elif trace == "reset-mismatch":
             _append_note(rec, "a jump's reset matches no declared edge")
         elif trace == "time-mismatch":
-            _append_note(rec, "a dwell disagrees with its endpoints by "
-                              f"{abs(dwell_slack):.3g}")
+            _append_note(
+                rec, f"a dwell disagrees with its endpoints by {abs(dwell_slack):.3g}"
+            )
         rec["seconds"] = "%.2f" % (time.time() - started)
         records.append(rec)
         if progress is not None:
@@ -700,6 +749,7 @@ def write_report(records: List[Dict[str, Any]], path: str) -> None:
 
 def summarize(records: List[Dict[str, Any]]) -> str:
     from collections import Counter
+
     counts = Counter(r["verdict"] for r in records)
     by_label = Counter((r["label"], r["verdict"]) for r in records)
     lines = ["", f"{len(records)} counterexample(s)"]
@@ -708,17 +758,24 @@ def summarize(records: List[Dict[str, Any]]) -> str:
             lines.append(f"  {verdict:<12} {counts[verdict]:>4}")
     unstable = [r for r in records if r["stable"] == "no"]
     if unstable:
-        lines.append("  {:<12} {:>4}  (verdict changes under {}x sampling)".format(
-            "unstable", len(unstable), REFINE_FACTOR))
+        lines.append(
+            "  {:<12} {:>4}  (verdict changes under {}x sampling)".format(
+                "unstable", len(unstable), REFINE_FACTOR
+            )
+        )
     unresolved = [r for r in records if r["resolved"] == "no"]
     if unresolved:
-        lines.append("  {:<12} {:>4}  (rho(0) within the measurement error of "
-                     "a band edge)".format("edge", len(unresolved)))
+        lines.append(
+            "  {:<12} {:>4}  (rho(0) within the measurement error of "
+            "a band edge)".format("edge", len(unresolved))
+        )
     traces = Counter(r["trace"] for r in records if r["trace"])
     for trace in ("guard-violating", "reset-mismatch", "time-mismatch"):
         if traces[trace]:
-            lines.append(f"  {trace:<14} {traces[trace]:>4}  (witness is not a "
-                         "trace the automaton can produce)")
+            lines.append(
+                f"  {trace:<14} {traces[trace]:>4}  (witness is not a "
+                "trace the automaton can produce)"
+            )
     lines.append("  by label:")
     for (label, verdict), n in sorted(by_label.items()):
         lines.append("    {:<10} {:<12} {:>4}".format(label or "-", verdict, n))
@@ -728,26 +785,44 @@ def summarize(records: List[Dict[str, Any]]) -> str:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m stlmc.generation.validate",
-        description="Validate the counterexamples in a pool by simulation.")
+        description="Validate the counterexamples in a pool by simulation.",
+    )
     parser.add_argument("pool", help="a .counterexamples or .counterexample file")
-    parser.add_argument("-samples", type=int, default=DEFAULT_SAMPLES,
-                        help=f"time samples per segment (default {DEFAULT_SAMPLES})")
-    parser.add_argument("-no-refine", dest="refine", action="store_false",
-                        help=f"skip the {REFINE_FACTOR}x re-validation, which "
-                             f"is what measures the sampling error")
-    parser.add_argument("-tau", type=float, default=None,
-                        help="robustness threshold (default: the pool's own)")
-    parser.add_argument("-delta", type=float, default=None,
-                        help="backend precision (default: the relaxation the "
-                             "pool records, 0 for a pool that records none)")
-    parser.add_argument("-out", default=None,
-                        help="report path (default: <pool>.validation.csv)")
+    parser.add_argument(
+        "-samples",
+        type=int,
+        default=DEFAULT_SAMPLES,
+        help=f"time samples per segment (default {DEFAULT_SAMPLES})",
+    )
+    parser.add_argument(
+        "-no-refine",
+        dest="refine",
+        action="store_false",
+        help=f"skip the {REFINE_FACTOR}x re-validation, which "
+        f"is what measures the sampling error",
+    )
+    parser.add_argument(
+        "-tau",
+        type=float,
+        default=None,
+        help="robustness threshold (default: the pool's own)",
+    )
+    parser.add_argument(
+        "-delta",
+        type=float,
+        default=None,
+        help="backend precision (default: the relaxation the "
+        "pool records, 0 for a pool that records none)",
+    )
+    parser.add_argument(
+        "-out", default=None, help="report path (default: <pool>.validation.csv)"
+    )
     args = parser.parse_args(argv)
 
     with open(args.pool, "rb") as handle:
         payload = pickle.load(handle)
     if not isinstance(payload[0], list):
-        payload = ([payload[0]],) + tuple(payload[1:])   # single-CE file
+        payload = ([payload[0]],) + tuple(payload[1:])  # single-CE file
 
     out = args.out or f"{args.pool}.validation.csv"
     total = len(payload[0])
@@ -755,13 +830,17 @@ def main(argv=None) -> int:
 
     def progress(done, n):
         if done % 10 == 0 or done == n:
-            print(f"  validated {done}/{n}  ({time.time() - started:.0f}s)",
-                  flush=True)
+            print(f"  validated {done}/{n}  ({time.time() - started:.0f}s)", flush=True)
 
     print(f"validating {total} counterexample(s) in {os.path.basename(args.pool)}")
-    records = validate_pool(payload, samples=args.samples, refine=args.refine,
-                            tau=args.tau, backend_delta=args.delta,
-                            progress=progress)
+    records = validate_pool(
+        payload,
+        samples=args.samples,
+        refine=args.refine,
+        tau=args.tau,
+        backend_delta=args.delta,
+        progress=progress,
+    )
     write_report(records, out)
     print(summarize(records))
     print(f"\nwrote {out}")

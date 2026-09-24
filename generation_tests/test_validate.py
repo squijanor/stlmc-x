@@ -125,11 +125,11 @@ class TestPoolBackendDelta:
 
 
 def _const_flow():
-    return Function([Real("x")], [Real("x")])          # x(t) = x
+    return Function([Real("x")], [Real("x")])  # x(t) = x
 
 
 def _nan_flow():
-    return Ode([Real("x")], [Sqrt(RealVal("-1"))])     # dx/dt = sqrt(-1) = nan
+    return Ode([Real("x")], [Sqrt(RealVal("-1"))])  # dx/dt = sqrt(-1) = nan
 
 
 def _trace(seg_x, taus, flow):
@@ -160,8 +160,17 @@ def _global_at(instant):
 def _payload(assn, rest, formula, tau=TAU, delta=0.0):
     modules, mode_var_dict, propositions, cont_var_dict, prop_dict = rest[0:5]
     return (
-        [assn], modules, mode_var_dict, propositions, cont_var_dict, prop_dict,
-        formula, None, tau, [""], delta,
+        [assn],
+        modules,
+        mode_var_dict,
+        propositions,
+        cont_var_dict,
+        prop_dict,
+        formula,
+        None,
+        tau,
+        [""],
+        delta,
     )
 
 
@@ -198,8 +207,7 @@ class TestJumpBoundaryValue:
     def test_a_jump_boundary_is_read_post_jump(self):
         # x: 10 on [0,1], 0 on [1,2]; evaluate x >= 5 at the jump instant 1.
         assn, rest = _trace([10, 0], [0, 1, 2], _const_flow())
-        verdict, rho0, _, _ = validate_ce(assn, rest, TAU, 0.0,
-                                          _global_at(1))
+        verdict, rho0, _, _ = validate_ce(assn, rest, TAU, 0.0, _global_at(1))
         assert rho0 == -5.0
         assert verdict == "falsifier"
 
@@ -207,8 +215,7 @@ class TestJumpBoundaryValue:
         # taus 0,1,2,2: the last segment is [2,2]; x is 0 there. The jump at the
         # final variable point is read in that segment.
         assn, rest = _trace([10, 10, 0], [0, 1, 2, 2], _const_flow())
-        verdict, rho0, _, _ = validate_ce(assn, rest, TAU, 0.0,
-                                          _global_at(2))
+        verdict, rho0, _, _ = validate_ce(assn, rest, TAU, 0.0, _global_at(2))
         assert rho0 == -5.0
         assert verdict == "falsifier"
 
@@ -216,8 +223,7 @@ class TestJumpBoundaryValue:
         # taus 0,0,2: the first segment is [0,0] and holds no sample, so rho(0)
         # is read in the segment entered at 0, where x is 0.
         assn, rest = _trace([10, 0], [0, 0, 2], _const_flow())
-        verdict, rho0, _, _ = validate_ce(assn, rest, TAU, 0.0,
-                                          _global_at(0))
+        verdict, rho0, _, _ = validate_ce(assn, rest, TAU, 0.0, _global_at(0))
         assert rho0 == -5.0
         assert verdict == "falsifier"
 
@@ -231,8 +237,9 @@ class TestNonFiniteRobustness:
         # []_1 False is -inf everywhere; the pre-fix reading was `falsifier`.
         assn, rest = _trace([1], [0, 1], _const_flow())
         horizon = Interval(True, RealVal("0"), True, RealVal("100"))
-        phi = GloballyFormula(Interval(True, RealVal("1"), True, RealVal("1")),
-                              horizon, BoolVal("False"))
+        phi = GloballyFormula(
+            Interval(True, RealVal("1"), True, RealVal("1")), horizon, BoolVal("False")
+        )
         verdict, rho0, _, _ = validate_ce(assn, rest, TAU, 0.0, phi)
         assert verdict == "error"
 
@@ -274,10 +281,12 @@ def _jump_model():
 
 def _two_segment_assn(x_exit, x_entry, post_mode=1, tau1=0.7, dwell=0.7):
     return {
-        Real("m_0"): RealVal("0"), Real("m_1"): RealVal(str(post_mode)),
+        Real("m_0"): RealVal("0"),
+        Real("m_1"): RealVal(str(post_mode)),
         Real("x_0_t"): RealVal(str(x_exit)),
         Real("x_1_0"): RealVal(str(x_entry)),
-        Real("tau_0"): RealVal("0"), Real("tau_1"): RealVal(str(tau1)),
+        Real("tau_0"): RealVal("0"),
+        Real("tau_1"): RealVal(str(tau1)),
         Real("time_0"): RealVal(str(dwell)),
     }
 
@@ -285,41 +294,45 @@ def _two_segment_assn(x_exit, x_entry, post_mode=1, tau1=0.7, dwell=0.7):
 class TestTraceCheck:
     def test_a_jump_below_the_guard_is_flagged(self):
         trace, guard_margin, _ = _trace_faults(
-            _two_segment_assn(1.12, 1.12), _jump_model(), _MODE, _RANGE, 0.0)
+            _two_segment_assn(1.12, 1.12), _jump_model(), _MODE, _RANGE, 0.0
+        )
         assert trace == "guard-violating"
         assert guard_margin < 0
 
     def test_a_jump_that_meets_the_guard_is_consistent(self):
         trace, guard_margin, _ = _trace_faults(
-            _two_segment_assn(1.4, 1.4), _jump_model(), _MODE, _RANGE, 0.0)
+            _two_segment_assn(1.4, 1.4), _jump_model(), _MODE, _RANGE, 0.0
+        )
         assert trace == "consistent"
         assert guard_margin > 0
 
     def test_a_guard_met_within_the_backend_slack_is_not_a_violation(self):
         # x_0_t = 1.2995 misses the guard by 5e-4, inside a 1e-3 backend delta.
         trace, _, _ = _trace_faults(
-            _two_segment_assn(1.2995, 1.2995), _jump_model(), _MODE, _RANGE, 1e-3)
+            _two_segment_assn(1.2995, 1.2995), _jump_model(), _MODE, _RANGE, 1e-3
+        )
         assert trace == "consistent"
 
     def test_a_reset_no_edge_produces_is_a_mismatch(self):
         # mode changes 0 -> 1 but x is not carried, so reset x' = x fails.
         trace, _, _ = _trace_faults(
-            _two_segment_assn(1.4, 0.2), _jump_model(), _MODE, _RANGE, 0.0)
+            _two_segment_assn(1.4, 0.2), _jump_model(), _MODE, _RANGE, 0.0
+        )
         assert trace == "reset-mismatch"
 
     def test_an_unchanged_mode_carried_identically_is_a_stutter(self):
         # no declared jump reaches mode 0 from mode 0; identity makes it a
         # stutter, which needs no guard.
         trace, _, _ = _trace_faults(
-            _two_segment_assn(0.5, 0.5, post_mode=0), _jump_model(), _MODE,
-            _RANGE, 0.0)
+            _two_segment_assn(0.5, 0.5, post_mode=0), _jump_model(), _MODE, _RANGE, 0.0
+        )
         assert trace == "consistent"
 
     def test_a_dwell_that_disagrees_with_its_endpoints_is_flagged(self):
         # tau_1 - tau_0 = 0.7 but time_0 = 0.9: a 0.2 disagreement.
         trace, _, dwell_slack = _trace_faults(
-            _two_segment_assn(1.4, 1.4, dwell=0.9), _jump_model(), _MODE,
-            _RANGE, 0.0)
+            _two_segment_assn(1.4, 1.4, dwell=0.9), _jump_model(), _MODE, _RANGE, 0.0
+        )
         assert trace == "time-mismatch"
         assert abs(dwell_slack) > 0.1
 

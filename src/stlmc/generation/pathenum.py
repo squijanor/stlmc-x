@@ -250,10 +250,15 @@ def block_radius(assn: dict[Variable, Constant], radius: int, uid: int) -> PathB
 
 def _verdict(pool, any_unresolved, visited, max_depth):
     """kappa_path's wording for the shared depth-scoping rule."""
-    return scoped_verdict(pool, any_unresolved, visited, max_depth,
-                          tag="kappa_path",
-                          nothing_found="no counterexample found",
-                          unresolved_source="at least one depth")
+    return scoped_verdict(
+        pool,
+        any_unresolved,
+        visited,
+        max_depth,
+        tag="kappa_path",
+        nothing_found="no counterexample found",
+        unresolved_source="at least one depth",
+    )
 
 
 def _exhaustion_note(depth: int, found: int, coarsened: bool) -> str:
@@ -267,17 +272,23 @@ def _exhaustion_note(depth: int, found: int, coarsened: bool) -> str:
     and the gap between them is a property of the goal, not only of the model.
     """
     if found == 0:
-        return (f"[kappa_path] depth {depth}: no counterexample at this depth "
-                "(absence, established by exhaustion)")
+        return (
+            f"[kappa_path] depth {depth}: no counterexample at this depth "
+            "(absence, established by exhaustion)"
+        )
     if coarsened:
-        return (f"[kappa_path] depth {depth}: search exhausted after {found} "
-                "path(s), but radius-r blocking was active -- a radius-r block "
-                "also excludes words never exhibited, so absence of further "
-                "paths is NOT established; re-run with radius = 0 to make it "
-                "conclusive")
-    return (f"[kappa_path] depth {depth}: falsifying words exhausted after "
-            f"{found} path(s) -- no location word outside the pool falsifies at "
-            "this depth")
+        return (
+            f"[kappa_path] depth {depth}: search exhausted after {found} "
+            "path(s), but radius-r blocking was active -- a radius-r block "
+            "also excludes words never exhibited, so absence of further "
+            "paths is NOT established; re-run with radius = 0 to make it "
+            "conclusive"
+        )
+    return (
+        f"[kappa_path] depth {depth}: falsifying words exhausted after "
+        f"{found} path(s) -- no location word outside the pool falsifies at "
+        "this depth"
+    )
 
 
 class DiscretePathEnum(Algorithm):
@@ -295,8 +306,11 @@ class DiscretePathEnum(Algorithm):
         tau_max = float(common.get_value("time-bound"))
         delta = float(common.get_value("threshold"))
         underlying = common.get_value("solver")
-        _th = (common.get_value("time-horizon")
-               if common.is_argument_in("time-horizon") else "time-bound")
+        _th = (
+            common.get_value("time-horizon")
+            if common.is_argument_in("time-horizon")
+            else "time-bound"
+        )
         self._time_horizon = tau_max if str(_th) == "time-bound" else float(_th)
 
         # Fail fast on malformed [gen] values, before any solver work, so a
@@ -314,12 +328,14 @@ class DiscretePathEnum(Algorithm):
         # states what the run actually uses rather than what was written.
         if radius is not None and radius < 0:
             printer.print_normal(
-                f"[kappa_path] [gen] radius {radius} is negative; using 0")
+                f"[kappa_path] [gen] radius {radius} is negative; using 0"
+            )
         radius = max(0, radius or 0)
         if per_depth is not None and per_depth < 0:
             printer.print_normal(
                 f"[kappa_path] [gen] k-paths {per_depth} is negative; using 0 "
-                "(every depth is visited, no query is posed, nothing is decided)")
+                "(every depth is visited, no query is posed, nothing is decided)"
+            )
             per_depth = 0
 
         # The resolved parameters, not the configured ones: depths are clamped to
@@ -330,11 +346,14 @@ class DiscretePathEnum(Algorithm):
             "[kappa_path] radius={}, k-paths={}, target depths={}".format(
                 radius,
                 "exhaust" if per_depth is None else per_depth,
-                "/".join(str(d) for d in target_depths) or "none"))
+                "/".join(str(d) for d in target_depths) or "none",
+            )
+        )
         if not target_depths:
             printer.print_normal(
                 f"[kappa_path] [gen] depths selected no depth in 0..{max_depth}, "
-                "so no depth is examined and nothing can be concluded")
+                "so no depth is examined and nothing can be concluded"
+            )
 
         warn_unpinned_hashseed(printer)
 
@@ -357,13 +376,15 @@ class DiscretePathEnum(Algorithm):
             printer.print_normal(
                 f"[kappa_path] backend precision="
                 f"{float(backend_precision(config, underlying))} "
-                f"per solver call ([dreal] precision)")
+                f"per solver call ([dreal] precision)"
+            )
             order, step = ode_settings(config)
             printer.print_normal(
                 f"[kappa_path] dReal ODE integration: "
                 f"order={'auto' if order is None else order}, "
                 f"step={'auto' if step is None else step} "
-                f"([dreal] ode-order / ode-step)")
+                f"([dreal] ode-order / ode-step)"
+            )
 
         encoder = Encoder(model, goal, prop_dict, delta, tau_max)
 
@@ -378,8 +399,18 @@ class DiscretePathEnum(Algorithm):
         # single incremental query below.
         if underlying == "dreal":
             return self._run_reduced(
-                encoder, target_depths, per_depth, radius, seed, logic,
-                config, logger, printer, max_depth, tau_max)
+                encoder,
+                target_depths,
+                per_depth,
+                radius,
+                seed,
+                logic,
+                config,
+                logger,
+                printer,
+                max_depth,
+                tau_max,
+            )
 
         pool: list[dict[Variable, Constant]] = []
         # Auxiliary variables introduced by the blocks. They appear in every
@@ -400,10 +431,10 @@ class DiscretePathEnum(Algorithm):
             oracle.assert_(encoding.consts)
 
             found = 0
-            coarsened = False   # a radius>=1 block was asserted at this depth
-            capped = False      # the cap has been reported at this depth
-            blocks = 0          # blocking clauses in the query at this depth
-            calls: list[float] = []   # seconds taken by each solver call
+            coarsened = False  # a radius>=1 block was asserted at this depth
+            capped = False  # the cap has been reported at this depth
+            blocks = 0  # blocking clauses in the query at this depth
+            calls: list[float] = []  # seconds taken by each solver call
             while per_depth is None or found < per_depth:
                 started = time.perf_counter()
                 verdict = oracle.check()
@@ -414,7 +445,8 @@ class DiscretePathEnum(Algorithm):
                 # the quantities a re-solve strategy is judged on.
                 printer.print_verbose(
                     f"[kappa_path] depth {depth}: call {len(calls)} over "
-                    f"{blocks} block(s): {verdict} in {calls[-1]:.3f}s")
+                    f"{blocks} block(s): {verdict} in {calls[-1]:.3f}s"
+                )
                 if verdict != SAT:
                     # UNSAT and UNKNOWN are different results. UNKNOWN means the
                     # backend gave up, which is NOT evidence of absence;
@@ -426,11 +458,11 @@ class DiscretePathEnum(Algorithm):
                         why = oracle.unknown_reason() or "backend did not decide"
                         printer.print_normal(
                             f"[kappa_path] depth {depth}: search UNRESOLVED "
-                            f"({why}) -- the path space is NOT proven exhausted")
+                            f"({why}) -- the path space is NOT proven exhausted"
+                        )
                     else:
                         decided.append(depth)
-                        printer.print_normal(
-                            _exhaustion_note(depth, found, coarsened))
+                        printer.print_normal(_exhaustion_note(depth, found, coarsened))
                     break
 
                 assn = oracle.model()
@@ -459,7 +491,8 @@ class DiscretePathEnum(Algorithm):
                         f"[kappa_path] depth {depth}: cannot block this model "
                         f"({what}); the model is not pooled and the depth "
                         "stops UNRESOLVED -- the path space is NOT proven "
-                        "exhausted")
+                        "exhausted"
+                    )
                     break
 
                 if not pool:
@@ -472,7 +505,8 @@ class DiscretePathEnum(Algorithm):
                     printer.print_normal(
                         f"[kappa_path] depth {depth}: [gen] radius {radius} "
                         f"exceeds the {depth + 1} positions of a word at this "
-                        f"depth; capped to {block.radius}")
+                        f"depth; capped to {block.radius}"
+                    )
                 coarsened = coarsened or block.radius >= 1
                 auxiliary.update(block.indicators)
                 oracle.assert_(block.clause)
@@ -487,13 +521,15 @@ class DiscretePathEnum(Algorithm):
                 printer.print_normal(
                     f"[kappa_path] depth {depth}: stopped at the [gen] k-paths "
                     f"budget after {found} path(s) -- the path space at this "
-                    "depth is NOT known to be exhausted")
+                    "depth is NOT known to be exhausted"
+                )
 
             # A depth that posed no query (a zero budget) has nothing to report.
             if calls:
                 printer.print_normal(
                     f"[kappa_path] depth {depth}: {len(calls)} solver call(s), "
-                    f"{sum(calls):.2f}s total, slowest {max(calls):.2f}s")
+                    f"{sum(calls):.2f}s total, slowest {max(calls):.2f}s"
+                )
 
             encoder.reset()
 
@@ -533,8 +569,20 @@ class DiscretePathEnum(Algorithm):
             return core
         return max(1, cpus // 4 if cpus % 4 == 0 else cpus // 2)
 
-    def _run_reduced(self, encoder, target_depths, per_depth, radius, seed,
-                     logic, config, logger, printer, max_depth, tau_max):
+    def _run_reduced(
+        self,
+        encoder,
+        target_depths,
+        per_depth,
+        radius,
+        seed,
+        logic,
+        config,
+        logger,
+        printer,
+        max_depth,
+        tau_max,
+    ):
         """Delta path: enumerate falsifying words on the base checker's reduced
         query and verify each on dReal.
 
@@ -586,7 +634,8 @@ class DiscretePathEnum(Algorithm):
         """
         acc = _PathReducedAcc(max_depth)
         feasibility = LinearWordFeasibilityFilter(
-            encoder.model, tau_max, getattr(self, "_time_horizon", None))
+            encoder.model, tau_max, getattr(self, "_time_horizon", None)
+        )
 
         qsec = query_timeout(config)
         timeout_ms = None if qsec is None else max(1, int(qsec * 1000))
@@ -604,24 +653,53 @@ class DiscretePathEnum(Algorithm):
         # and block bookkeeping run on this thread; the workers only run dReal.
         # ``live`` tracks the in-flight checks so they are killed at shutdown
         # rather than waited out.
-        pool_exec = (ThreadPoolExecutor(max_workers=workers)
-                     if workers > 1 else None)
+        pool_exec = ThreadPoolExecutor(max_workers=workers) if workers > 1 else None
         live = _LiveVerifiers()
         try:
             for depth in target_depths:
                 components = encoder.enumerate_components_at(depth)
                 search = self._make_reduced_search(
-                    components, encoder.model, seed, timeout_ms)
+                    components, encoder.model, seed, timeout_ms
+                )
                 if pool_exec is None:
                     self._reduced_depth_serial(
-                        acc, depth, search, per_depth, radius, feasibility,
-                        qsec, every, depth_budget, config, logger, seed, logic,
-                        tau_max, printer)
+                        acc,
+                        depth,
+                        search,
+                        per_depth,
+                        radius,
+                        feasibility,
+                        qsec,
+                        every,
+                        depth_budget,
+                        config,
+                        logger,
+                        seed,
+                        logic,
+                        tau_max,
+                        printer,
+                    )
                 else:
                     self._reduced_depth_parallel(
-                        acc, depth, search, per_depth, radius, feasibility,
-                        qsec, every, depth_budget, config, logger, seed, logic,
-                        tau_max, printer, pool_exec, workers, live)
+                        acc,
+                        depth,
+                        search,
+                        per_depth,
+                        radius,
+                        feasibility,
+                        qsec,
+                        every,
+                        depth_budget,
+                        config,
+                        logger,
+                        seed,
+                        logic,
+                        tau_max,
+                        printer,
+                        pool_exec,
+                        workers,
+                        live,
+                    )
                 encoder.reset()
         finally:
             if pool_exec is not None:
@@ -632,16 +710,32 @@ class DiscretePathEnum(Algorithm):
 
         printer.print_normal(
             f"[kappa_path] pooled {len(acc.pool)} counterexample word(s) over "
-            f"{len(target_depths)} target depth(s)")
+            f"{len(target_depths)} target depth(s)"
+        )
 
         result, note = _verdict(acc.pool, acc.unresolved, acc.decided, max_depth)
         if note:
             printer.print_normal(note)
         return result, 0.0, acc.first_depth, acc.pool
 
-    def _reduced_depth_serial(self, acc, depth, search, per_depth, radius,
-                              feasibility, qsec, every, depth_budget, config,
-                              logger, seed, logic, tau_max, printer):
+    def _reduced_depth_serial(
+        self,
+        acc,
+        depth,
+        search,
+        per_depth,
+        radius,
+        feasibility,
+        qsec,
+        every,
+        depth_budget,
+        config,
+        logger,
+        seed,
+        logic,
+        tau_max,
+        printer,
+    ):
         """One target depth, one candidate at a time (parallel-core = 1 or
         parallel off)."""
         dctx = _PathDepthAcc(depth, radius, per_depth)
@@ -649,21 +743,25 @@ class DiscretePathEnum(Algorithm):
         calls: list[float] = []
         depth_start = time.perf_counter()
         while per_depth is None or dctx.found < per_depth:
-            if (depth_budget is not None
-                    and time.perf_counter() - depth_start > depth_budget):
+            if (
+                depth_budget is not None
+                and time.perf_counter() - depth_start > depth_budget
+            ):
                 acc.unresolved = True
                 dctx.undecided = True
                 printer.print_normal(
                     f"[kappa_path] depth {depth}: stopped at the [gen] "
                     f"pivot-budget ({depth_budget}s) after {candidates} "
                     "candidate structure(s) -- the path space is NOT proven "
-                    "exhausted")
+                    "exhausted"
+                )
                 break
 
             res = search.propose()
             if res is None:
-                self._reduced_exhaustion(acc, dctx, depth, search.last_verdict(),
-                                         printer)
+                self._reduced_exhaustion(
+                    acc, dctx, depth, search.last_verdict(), printer
+                )
                 break
 
             candidates += 1
@@ -674,7 +772,8 @@ class DiscretePathEnum(Algorithm):
                 printer.print_normal(
                     f"[kappa_path] depth {depth}: cannot block this model "
                     f"({guard}); the model is not pooled and the depth stops "
-                    "UNRESOLVED -- the path space is NOT proven exhausted")
+                    "UNRESOLVED -- the path space is NOT proven exhausted"
+                )
                 break
 
             cand = _reduced_candidate(res, depth)
@@ -683,13 +782,19 @@ class DiscretePathEnum(Algorithm):
                     printer.print_verbose(
                         f"[kappa_path] depth {depth}: candidate {candidates} "
                         f"(word {cand.word_str}) infeasible on the linear "
-                        "timeline -- skipped")
+                        "timeline -- skipped"
+                    )
                 search.add_block(Not(cand.word_pin))
                 continue
 
             verifier = make_oracle(
-                underlying="dreal", logic=logic, seed=seed, config=config,
-                logger=logger, time_bound=tau_max)
+                underlying="dreal",
+                logic=logic,
+                seed=seed,
+                config=config,
+                logger=logger,
+                time_bound=tau_max,
+            )
             verifier.assert_(cand.total_const)
             verifier.assert_(cand.word_pin)
             if depth_budget is not None:
@@ -704,25 +809,53 @@ class DiscretePathEnum(Algorithm):
             model = dict(verifier.model()) if verdict == SAT else None
             why = verifier.unknown_reason() if verdict == UNKNOWN else None
             _kind, block = _reduced_commit(
-                acc, dctx, cand, verdict, model, why, candidates, calls[-1],
-                every, printer)
+                acc,
+                dctx,
+                cand,
+                verdict,
+                model,
+                why,
+                candidates,
+                calls[-1],
+                every,
+                printer,
+            )
             search.add_block(block)
         else:
             printer.print_normal(
                 f"[kappa_path] depth {depth}: stopped at the [gen] k-paths "
                 f"budget after {dctx.found} word(s) -- the path space at this "
-                "depth is NOT known to be exhausted")
+                "depth is NOT known to be exhausted"
+            )
 
         if calls:
             printer.print_normal(
                 f"[kappa_path] depth {depth}: pooled {dctx.found} word(s) from "
                 f"{candidates} candidate structure(s) over {len(calls)} dReal "
-                f"call(s), {sum(calls):.2f}s total, slowest {max(calls):.2f}s")
+                f"call(s), {sum(calls):.2f}s total, slowest {max(calls):.2f}s"
+            )
 
-    def _reduced_depth_parallel(self, acc, depth, search, per_depth, radius,
-                                feasibility, qsec, every, depth_budget, config,
-                                logger, seed, logic, tau_max, printer, pool_exec,
-                                workers, live):
+    def _reduced_depth_parallel(
+        self,
+        acc,
+        depth,
+        search,
+        per_depth,
+        radius,
+        feasibility,
+        qsec,
+        every,
+        depth_budget,
+        config,
+        logger,
+        seed,
+        logic,
+        tau_max,
+        printer,
+        pool_exec,
+        workers,
+        live,
+    ):
         """One target depth with the per-candidate dReal checks fanned across the
         pool. Proposal, the linear screen and block bookkeeping stay on this
         thread; feasible candidates are proposed ahead under a provisional pair
@@ -738,13 +871,13 @@ class DiscretePathEnum(Algorithm):
         deadline = None if depth_budget is None else depth_start + depth_budget
         window = _WINDOW_FACTOR * workers
 
-        inflight: dict = {}   # pos -> (cand, future)
-        ready: dict = {}      # pos -> ("skip", cand) | ("job", cand, v, m, el, why)
+        inflight: dict = {}  # pos -> (cand, future)
+        ready: dict = {}  # pos -> ("skip", cand) | ("job", cand, v, m, el, why)
         next_pos = 0
         commit_pos = 1
-        spent = None          # None | UNSAT | UNKNOWN | "guard"
+        spent = None  # None | UNSAT | UNKNOWN | "guard"
         guard_msg = None
-        capped = False        # the [gen] k-paths budget was reached
+        capped = False  # the [gen] k-paths budget was reached
 
         def _verify(cand):
             # Read the budget when the worker starts (not when queued): a
@@ -755,15 +888,24 @@ class DiscretePathEnum(Algorithm):
             if deadline is not None:
                 remaining = deadline - time.perf_counter()
                 if remaining <= 0:
-                    return (UNKNOWN, None, 0.0,
-                            "the per-depth [gen] pivot-budget elapsed before "
-                            "this candidate started")
+                    return (
+                        UNKNOWN,
+                        None,
+                        0.0,
+                        "the per-depth [gen] pivot-budget elapsed before "
+                        "this candidate started",
+                    )
                 call_budget = max(remaining, _MIN_CALL_BUDGET)
                 if qsec is not None:
                     call_budget = min(call_budget, qsec)
             verifier = make_oracle(
-                underlying="dreal", logic=logic, seed=seed, config=config,
-                logger=logger, time_bound=tau_max)
+                underlying="dreal",
+                logic=logic,
+                seed=seed,
+                config=config,
+                logger=logger,
+                time_bound=tau_max,
+            )
             # Registered so a cap or the run's end can kill this check instead of
             # waiting out its budget; discarded when it returns.
             live.add(verifier)
@@ -782,13 +924,15 @@ class DiscretePathEnum(Algorithm):
                 live.discard(verifier)
 
         while True:
-            while (spent is None and len(inflight) < window
-                   and (deadline is None or time.perf_counter() < deadline)
-                   and (per_depth is None or dctx.found < per_depth)):
+            while (
+                spent is None
+                and len(inflight) < window
+                and (deadline is None or time.perf_counter() < deadline)
+                and (per_depth is None or dctx.found < per_depth)
+            ):
                 res = search.propose()
                 if res is None:
-                    spent = (UNSAT if search.last_verdict() == UNSAT
-                             else UNKNOWN)
+                    spent = UNSAT if search.last_verdict() == UNSAT else UNKNOWN
                     break
                 raw_word = _location_word(res[2])
                 guard = _guard_reason(raw_word, depth)
@@ -797,7 +941,8 @@ class DiscretePathEnum(Algorithm):
                         f"[kappa_path] depth {depth}: cannot block this model "
                         f"({guard}); the model is not pooled and the depth "
                         "stops UNRESOLVED -- the path space is NOT proven "
-                        "exhausted")
+                        "exhausted"
+                    )
                     spent = "guard"
                     break
                 next_pos += 1
@@ -824,14 +969,16 @@ class DiscretePathEnum(Algorithm):
                         printer.print_verbose(
                             f"[kappa_path] depth {depth}: candidate "
                             f"{candidates} (word {cand.word_str}) infeasible on "
-                            "the linear timeline -- skipped")
+                            "the linear timeline -- skipped"
+                        )
                     commit_pos += 1
                     continue
                 _tag, cand, v, m, el, why = item
                 candidates += 1
                 calls.append(el)
                 kind, block = _reduced_commit(
-                    acc, dctx, cand, v, m, why, candidates, el, every, printer)
+                    acc, dctx, cand, v, m, why, candidates, el, every, printer
+                )
                 if kind == "pool":
                     # The provisional pair block is already installed; the radius
                     # block (which subsumes it) excludes this word's ball from
@@ -845,9 +992,13 @@ class DiscretePathEnum(Algorithm):
             # A path budget already met with nothing left to commit or verify
             # (normally reached in the commit loop above; also the degenerate
             # k-paths = 0, which proposes no query at all).
-            if (not capped and per_depth is not None
-                    and dctx.found >= per_depth and not inflight
-                    and commit_pos not in ready):
+            if (
+                not capped
+                and per_depth is not None
+                and dctx.found >= per_depth
+                and not inflight
+                and commit_pos not in ready
+            ):
                 capped = True
 
             if capped:
@@ -861,26 +1012,35 @@ class DiscretePathEnum(Algorithm):
                 printer.print_normal(
                     f"[kappa_path] depth {depth}: stopped at the [gen] k-paths "
                     f"budget after {dctx.found} word(s) -- the path space at "
-                    "this depth is NOT known to be exhausted")
+                    "this depth is NOT known to be exhausted"
+                )
                 break
 
-            past_deadline = (deadline is not None
-                             and time.perf_counter() >= deadline)
+            past_deadline = deadline is not None and time.perf_counter() >= deadline
             if not inflight and (spent is not None or past_deadline):
                 break
 
-            can_refill = (spent is None and len(inflight) < window
-                          and (deadline is None
-                               or time.perf_counter() < deadline)
-                          and (per_depth is None or dctx.found < per_depth))
+            can_refill = (
+                spent is None
+                and len(inflight) < window
+                and (deadline is None or time.perf_counter() < deadline)
+                and (per_depth is None or dctx.found < per_depth)
+            )
             if inflight and not can_refill and commit_pos not in ready:
                 pending = [f for _c, f in inflight.values()]
-                timeout = (None if deadline is None
-                           else max(0.0, deadline - time.perf_counter()))
-                done_set, _ = wait(pending, timeout=timeout,
-                                   return_when=FIRST_COMPLETED)
-                if (not done_set and deadline is not None
-                        and time.perf_counter() >= deadline):
+                timeout = (
+                    None
+                    if deadline is None
+                    else max(0.0, deadline - time.perf_counter())
+                )
+                done_set, _ = wait(
+                    pending, timeout=timeout, return_when=FIRST_COMPLETED
+                )
+                if (
+                    not done_set
+                    and deadline is not None
+                    and time.perf_counter() >= deadline
+                ):
                     for _c, f in inflight.values():
                         f.cancel()
                     # Kill checks the deadline makes stale so the depth is not
@@ -894,20 +1054,21 @@ class DiscretePathEnum(Algorithm):
                 printer.print_normal(guard_msg)
         elif spent in (UNSAT, UNKNOWN):
             self._reduced_exhaustion(acc, dctx, depth, spent, printer)
-        elif not capped and deadline is not None and (
-                time.perf_counter() >= deadline):
+        elif not capped and deadline is not None and (time.perf_counter() >= deadline):
             acc.unresolved = True
             dctx.undecided = True
             printer.print_normal(
                 f"[kappa_path] depth {depth}: stopped at the [gen] pivot-budget "
                 f"({depth_budget}s) after {candidates} candidate structure(s) "
-                "-- the path space is NOT proven exhausted")
+                "-- the path space is NOT proven exhausted"
+            )
 
         if calls:
             printer.print_normal(
                 f"[kappa_path] depth {depth}: pooled {dctx.found} word(s) from "
                 f"{candidates} candidate structure(s) over {len(calls)} dReal "
-                f"call(s), {sum(calls):.2f}s total, slowest {max(calls):.2f}s")
+                f"call(s), {sum(calls):.2f}s total, slowest {max(calls):.2f}s"
+            )
 
     def _reduced_exhaustion(self, acc, dctx, depth, last_verdict, printer):
         """Depth-scoping at proposal exhaustion, shared by both paths. An
@@ -917,26 +1078,26 @@ class DiscretePathEnum(Algorithm):
         running dry."""
         if last_verdict == UNSAT and not dctx.undecided:
             acc.decided.append(depth)
-            printer.print_normal(_exhaustion_note(depth, dctx.found,
-                                                  dctx.coarsened))
+            printer.print_normal(_exhaustion_note(depth, dctx.found, dctx.coarsened))
         elif last_verdict == UNSAT:
             printer.print_normal(
                 f"[kappa_path] depth {depth}: the skeleton space is enumerated "
                 "but at least one structure was undecided, so absence is NOT "
-                "established at this depth")
+                "established at this depth"
+            )
         else:
             acc.unresolved = True
             printer.print_normal(
                 f"[kappa_path] depth {depth}: structure search UNRESOLVED "
                 "(scenario solver or reduced-query minimizer did not decide) -- "
-                "the path space is NOT proven exhausted")
+                "the path space is NOT proven exhausted"
+            )
 
     def _make_reduced_search(self, components, model, seed, timeout_ms):
         """Construct the reduced-query structure search. A seam so a test can
         substitute a scripted search that returns proposals sharing a
         ``path_const`` -- the case the word-aware block exists for."""
-        return ReducedPivotSearch(
-            components, model, seed=seed, timeout_ms=timeout_ms)
+        return ReducedPivotSearch(components, model, seed=seed, timeout_ms=timeout_ms)
 
 
 class _PathReducedAcc:
@@ -963,10 +1124,10 @@ class _PathDepthAcc:
         self.eff_radius = max(0, min(radius, depth))
         self.per_depth = per_depth
         self.found = 0
-        self.coarsened = False   # a radius>=1 block was asserted at this depth
-        self.capped = False      # the cap has been reported at this depth
+        self.coarsened = False  # a radius>=1 block was asserted at this depth
+        self.capped = False  # the cap has been reported at this depth
         self.pooled_words: list[tuple] = []
-        self.undecided = False   # a verify/minimizer returned UNKNOWN here
+        self.undecided = False  # a verify/minimizer returned UNKNOWN here
 
 
 class _ReducedCand(NamedTuple):
@@ -1009,8 +1170,9 @@ def _reduced_candidate(res, depth: int) -> _ReducedCand:
     # reduced path AND this word), leaving the path available to a sibling word.
     pair_block = Not(And([path_const, word_pin]))
     mode_seq = [int(round(float(val.value))) for _, val in canon]
-    return _ReducedCand(total_const, path_const, assn, canon, word_str,
-                        word_pin, pair_block, mode_seq)
+    return _ReducedCand(
+        total_const, path_const, assn, canon, word_str, word_pin, pair_block, mode_seq
+    )
 
 
 def _word_key(canon) -> tuple:
@@ -1029,8 +1191,9 @@ def _within_ball(key, pooled, radius: int) -> bool:
     return False
 
 
-def _reduced_commit(acc, dctx, cand, verdict, model, why, candidate_no,
-                    elapsed, every, printer):
+def _reduced_commit(
+    acc, dctx, cand, verdict, model, why, candidate_no, elapsed, every, printer
+):
     """Apply one verified candidate's verdict: pool a genuine delta-falsifier,
     or exclude a refuted/undecided pair. Mutates ``acc`` (pool, block id, first
     depth, unresolved) and ``dctx`` (found, coarsening, cap, pooled words,
@@ -1043,7 +1206,8 @@ def _reduced_commit(acc, dctx, cand, verdict, model, why, candidate_no,
         printer.print_verbose(
             f"[kappa_path] depth {depth}: candidate {candidate_no} "
             f"(word {cand.word_str}) over {dctx.found} pooled word(s): "
-            f"{verdict} in {elapsed:.3f}s")
+            f"{verdict} in {elapsed:.3f}s"
+        )
 
     if verdict == UNKNOWN:
         acc.unresolved = True
@@ -1052,7 +1216,8 @@ def _reduced_commit(acc, dctx, cand, verdict, model, why, candidate_no,
         printer.print_normal(
             f"[kappa_path] depth {depth}: candidate {candidate_no} "
             f"(word {cand.word_str}) UNRESOLVED ({why_txt}) -- this structure "
-            "is not counted toward exhaustion")
+            "is not counted toward exhaustion"
+        )
         return "block", cand.pair_block
 
     if verdict == UNSAT:
@@ -1065,7 +1230,8 @@ def _reduced_commit(acc, dctx, cand, verdict, model, why, candidate_no,
         printer.print_normal(
             f"[kappa_path] depth {depth}: candidate {candidate_no} "
             f"(word {cand.word_str}) is satisfiable but its witness omits part "
-            "of the location word; not pooled, depth left unresolved")
+            "of the location word; not pooled, depth left unresolved"
+        )
         return "block", cand.pair_block
 
     key = _word_key(cand.canon)
@@ -1080,7 +1246,8 @@ def _reduced_commit(acc, dctx, cand, verdict, model, why, candidate_no,
         printer.print_normal(
             f"[kappa_path] depth {depth}: candidate {candidate_no} "
             f"(word {cand.word_str}) is satisfiable but its witness spells a "
-            "different word; not pooled, depth left unresolved")
+            "different word; not pooled, depth left unresolved"
+        )
         return "block", cand.pair_block
     # Enforce radius separation at commit: a word inside an already-pooled word's
     # ball is excluded even if it was proposed before that word's block landed.
@@ -1101,11 +1268,12 @@ def _reduced_commit(acc, dctx, cand, verdict, model, why, candidate_no,
         printer.print_normal(
             f"[kappa_path] depth {depth}: [gen] radius {dctx.radius} exceeds "
             f"the {depth + 1} positions of a word at this depth; capped to "
-            f"{block.radius}")
+            f"{block.radius}"
+        )
     dctx.coarsened = dctx.coarsened or block.radius >= 1
     acc.block_id += 1
     dctx.found += 1
     printer.print_verbose(
-        f"[kappa_path] depth {depth}: {dctx.found} word(s) here, "
-        f"{len(acc.pool)} total")
+        f"[kappa_path] depth {depth}: {dctx.found} word(s) here, {len(acc.pool)} total"
+    )
     return "pool", block.clause

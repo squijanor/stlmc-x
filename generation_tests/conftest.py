@@ -176,8 +176,7 @@ def covers(var, *values):
 
     def undecided(window):
         lo, hi = window.get(var, (None, None))
-        return any((lo is None or lo <= v) and (hi is None or v <= hi)
-                   for v in wanted)
+        return any((lo is None or lo <= v) and (hi is None or v <= hi) for v in wanted)
 
     return undecided
 

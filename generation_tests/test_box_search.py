@@ -56,11 +56,13 @@ TRUE = BoolVal("True")
 
 def assn(**values):
     """An assignment dict keyed by Real variables, as a solver would return."""
-    return {Real(name): RealVal(str(Fraction(str(value))))
-            for name, value in values.items()}
+    return {
+        Real(name): RealVal(str(Fraction(str(value)))) for name, value in values.items()
+    }
 
 
 # ===================================================================== faces
+
 
 class TestSearchFace:
     """_search_face locates the largest falsifying value towards a wall.
@@ -77,16 +79,18 @@ class TestSearchFace:
         oracle = FakeOracleFor(x, 0, 4)
         tol = Fraction(1, 100)
         bound, status, calls = alg._search_face(
-            oracle, x, TRUE, Fraction(0), Fraction(10), tol)
+            oracle, x, TRUE, Fraction(0), Fraction(10), tol
+        )
         assert status == "frontier"
         assert bound <= 4 and 4 - bound <= tol, "bound must be falsifying-side"
         assert calls > 1, "a bracketed frontier requires more than the wall probe"
 
     def test_domain_when_the_falsifying_set_reaches_the_wall(self, x):
         alg = RegionBoxDiscovery()
-        oracle = FakeOracleFor(x, 0, 10)          # falsifying up to the wall
+        oracle = FakeOracleFor(x, 0, 10)  # falsifying up to the wall
         bound, status, calls = alg._search_face(
-            oracle, x, TRUE, Fraction(0), Fraction(10), Fraction(1, 100))
+            oracle, x, TRUE, Fraction(0), Fraction(10), Fraction(1, 100)
+        )
         assert status == "domain"
         assert bound == 10
         assert calls == 1, "the wall probe alone settles a domain face"
@@ -98,7 +102,8 @@ class TestSearchFace:
         alg = RegionBoxDiscovery()
         oracle = FakeOracleFor(x, 0, 4, undecided=beyond(x, 2))
         bound, status, _ = alg._search_face(
-            oracle, x, TRUE, Fraction(0), Fraction(10), Fraction(1, 100))
+            oracle, x, TRUE, Fraction(0), Fraction(10), Fraction(1, 100)
+        )
         assert status in ("partial", "frontier")
         if status == "partial":
             assert bound > 0, "partial means growth happened"
@@ -109,7 +114,8 @@ class TestSearchFace:
         alg = RegionBoxDiscovery()
         oracle = AlwaysUnknown()
         bound, status, _ = alg._search_face(
-            oracle, x, TRUE, Fraction(1), Fraction(10), Fraction(1, 100))
+            oracle, x, TRUE, Fraction(1), Fraction(10), Fraction(1, 100)
+        )
         assert status == "unresolved"
         assert bound == 1, "an unresolved face keeps the pivot as its bound"
 
@@ -119,30 +125,44 @@ class TestSearchFace:
         alg = RegionBoxDiscovery()
         oracle = FakeOracleFor(x, 0, 4, undecided=probe_at(x, 10))
         bound, status, _ = alg._search_face(
-            oracle, x, TRUE, Fraction(0), Fraction(10), Fraction(1, 100))
+            oracle, x, TRUE, Fraction(0), Fraction(10), Fraction(1, 100)
+        )
         assert status in ("partial", "frontier")
         assert bound > 0, "growth must still be found below the undecided wall"
 
     def test_reported_bound_is_always_falsifying(self, x):
         """Across every status: the bound is a point the oracle confirmed."""
         alg = RegionBoxDiscovery()
-        for undecided in (None, probe_at(x, 3), beyond(x, Fraction(1, 2)),
-                          probe_at(x, 10)):
+        for undecided in (
+            None,
+            probe_at(x, 3),
+            beyond(x, Fraction(1, 2)),
+            probe_at(x, 10),
+        ):
             oracle = FakeOracleFor(x, 0, 4, undecided=undecided)
             bound, status, _ = alg._search_face(
-                oracle, x, TRUE, Fraction(0), Fraction(10), Fraction(1, 100))
+                oracle, x, TRUE, Fraction(0), Fraction(10), Fraction(1, 100)
+            )
             assert bound <= 4, f"status={status} returned a non-falsifying bound"
 
 
 # ================================================================== harvest
+
 
 class TestHarvest:
     def test_points_are_spread_and_counted(self, x):
         alg = RegionBoxDiscovery()
         oracle = FakeOracleFor(x, 0, 10)
         got, requested, undecided = alg._harvest(
-            oracle, x, TRUE, Fraction(0), Fraction(1), Fraction(1, 10), 8,
-            Fraction(1, 20))
+            oracle,
+            x,
+            TRUE,
+            Fraction(0),
+            Fraction(1),
+            Fraction(1, 10),
+            8,
+            Fraction(1, 20),
+        )
         assert requested == 8, "budget binds before extent/theta here"
         assert undecided == 0
         assert len(got) == 8
@@ -151,8 +171,15 @@ class TestHarvest:
         alg = RegionBoxDiscovery()
         oracle = FakeOracleFor(x, 0, 10)
         _, requested, _ = alg._harvest(
-            oracle, x, TRUE, Fraction(0), Fraction(1, 4), Fraction(1, 10), 8,
-            Fraction(1, 20))
+            oracle,
+            x,
+            TRUE,
+            Fraction(0),
+            Fraction(1, 4),
+            Fraction(1, 10),
+            8,
+            Fraction(1, 20),
+        )
         assert requested == 2, "floor(0.25 / 0.1) = 2"
 
     def test_undecided_points_are_counted(self, x):
@@ -160,8 +187,15 @@ class TestHarvest:
         alg = RegionBoxDiscovery()
         oracle = FakeOracleFor(x, 0, 10, undecided=covers(x, Fraction(1, 16)))
         got, requested, undecided = alg._harvest(
-            oracle, x, TRUE, Fraction(0), Fraction(1), Fraction(1, 10), 8,
-            Fraction(1, 20))
+            oracle,
+            x,
+            TRUE,
+            Fraction(0),
+            Fraction(1),
+            Fraction(1, 10),
+            8,
+            Fraction(1, 20),
+        )
         assert undecided >= 1
         assert len(got) + undecided <= requested
 
@@ -169,12 +203,20 @@ class TestHarvest:
         alg = RegionBoxDiscovery()
         oracle = FakeOracleFor(x, 0, 10)
         got, requested, undecided = alg._harvest(
-            oracle, x, TRUE, Fraction(1), Fraction(1), Fraction(1, 10), 8,
-            Fraction(1, 20))
+            oracle,
+            x,
+            TRUE,
+            Fraction(1),
+            Fraction(1),
+            Fraction(1, 10),
+            8,
+            Fraction(1, 20),
+        )
         assert (got, requested, undecided) == ([], 0, 0)
 
 
 # ============================================================ theta per axis
+
 
 class TestTheta:
     def test_absolute_applies_to_every_axis(self, x, y):
@@ -185,8 +227,8 @@ class TestTheta:
         # widths are the effective IC-domain widths, keyed by the step-0 id.
         widths = {"x_0_0": Fraction(10), "y_0_0": Fraction(40)}
         theta = _Theta(Fraction(1, 100), Fraction(1, 200), widths)
-        assert theta.of(x) == Fraction(10, 200)     # 0.05
-        assert theta.of(y) == Fraction(40, 200)     # 0.20
+        assert theta.of(x) == Fraction(10, 200)  # 0.05
+        assert theta.of(y) == Fraction(40, 200)  # 0.20
 
     def test_relative_falls_back_where_no_width_is_known(self, x):
         theta = _Theta(Fraction(1, 100), Fraction(1, 200), {})
@@ -199,21 +241,25 @@ class TestTheta:
 
     def test_relative_equals_absolute_when_the_numbers_coincide(self, x):
         widths = {"x_0_0": Fraction(10)}
-        assert (_Theta(Fraction(1, 100), Fraction(1, 200), widths).of(x)
-                == _Theta(Fraction(1, 20)).of(x))
+        assert _Theta(Fraction(1, 100), Fraction(1, 200), widths).of(x) == _Theta(
+            Fraction(1, 20)
+        ).of(x)
 
 
 # ================================================================== blocking
 
+
 class TestBlocking:
     def test_a_point_inside_the_box_is_excluded(self, x, y):
-        block = _block_box({x: (Fraction(1), Fraction(2)),
-                            y: (Fraction(0), Fraction(1))})
+        block = _block_box(
+            {x: (Fraction(1), Fraction(2)), y: (Fraction(0), Fraction(1))}
+        )
         assert not _satisfies(block, {x: Fraction(3, 2), y: Fraction(1, 2)})
 
     def test_a_point_outside_on_any_axis_is_admitted(self, x, y):
-        block = _block_box({x: (Fraction(1), Fraction(2)),
-                            y: (Fraction(0), Fraction(1))})
+        block = _block_box(
+            {x: (Fraction(1), Fraction(2)), y: (Fraction(0), Fraction(1))}
+        )
         assert _satisfies(block, {x: Fraction(5), y: Fraction(1, 2)})
         assert _satisfies(block, {x: Fraction(3, 2), y: Fraction(9)})
 
@@ -226,13 +272,20 @@ class TestBlocking:
 
 # ============================================================ marker merging
 
+
 class TestMergeMarkers:
     def test_a_coincident_marker_relabels_instead_of_duplicating(self, x):
         witnesses = [assn(x_0_0=4.0)]
         labels = [_DEEP]
         merged = _merge_markers(
-            witnesses, labels, [assn(x_0_0=4.00001)], [_STRUCTURE_FRONTIER], [x],
-            lambda v: Fraction(1, 100), None)
+            witnesses,
+            labels,
+            [assn(x_0_0=4.00001)],
+            [_STRUCTURE_FRONTIER],
+            [x],
+            lambda v: Fraction(1, 100),
+            None,
+        )
         assert merged == 1
         assert len(witnesses) == 1, "no duplicate entry for one initial condition"
         assert labels == [_STRUCTURE_FRONTIER], "the frontier annotation survives"
@@ -241,8 +294,14 @@ class TestMergeMarkers:
         witnesses = [assn(x_0_0=4.0)]
         labels = [_DEEP]
         merged = _merge_markers(
-            witnesses, labels, [assn(x_0_0=5.0)], [_STRUCTURE_FRONTIER], [x],
-            lambda v: Fraction(1, 100), None)
+            witnesses,
+            labels,
+            [assn(x_0_0=5.0)],
+            [_STRUCTURE_FRONTIER],
+            [x],
+            lambda v: Fraction(1, 100),
+            None,
+        )
         assert merged == 0
         assert labels == [_DEEP, _STRUCTURE_FRONTIER]
 
@@ -252,36 +311,63 @@ class TestMergeMarkers:
         # claim, so the demonstration is not masked by the coincident edge.
         witnesses = [assn(x_0_0=4.0)]
         labels = [_IC_DOMAIN]
-        _merge_markers(witnesses, labels, [assn(x_0_0=4.0)], [_STRUCTURE_FRONTIER], [x],
-                       lambda v: Fraction(1, 100), None)
+        _merge_markers(
+            witnesses,
+            labels,
+            [assn(x_0_0=4.0)],
+            [_STRUCTURE_FRONTIER],
+            [x],
+            lambda v: Fraction(1, 100),
+            None,
+        )
         assert labels == [_STRUCTURE_FRONTIER]
 
     def test_a_domain_edge_does_not_downgrade_an_interior_frontier(self, x):
         witnesses = [assn(x_0_0=4.0)]
         labels = [_STRUCTURE_FRONTIER]
-        _merge_markers(witnesses, labels, [assn(x_0_0=4.0)], [_IC_DOMAIN], [x],
-                       lambda v: Fraction(1, 100), None)
+        _merge_markers(
+            witnesses,
+            labels,
+            [assn(x_0_0=4.0)],
+            [_IC_DOMAIN],
+            [x],
+            lambda v: Fraction(1, 100),
+            None,
+        )
         assert labels == [_STRUCTURE_FRONTIER], "the interior claim is stronger"
 
     def test_coincidence_requires_every_axis(self, x, y):
         witnesses = [assn(x_0_0=4.0, y_0_0=1.0)]
         labels = [_DEEP]
-        _merge_markers(witnesses, labels,
-                       [assn(x_0_0=4.0, y_0_0=9.0)], [_STRUCTURE_FRONTIER], [x, y],
-                       lambda v: Fraction(1, 100), None)
+        _merge_markers(
+            witnesses,
+            labels,
+            [assn(x_0_0=4.0, y_0_0=9.0)],
+            [_STRUCTURE_FRONTIER],
+            [x, y],
+            lambda v: Fraction(1, 100),
+            None,
+        )
         assert len(witnesses) == 2, "far apart on y is not a coincidence"
 
     def test_tolerance_may_differ_per_axis(self, x, y):
         witnesses = [assn(x_0_0=0.0, y_0_0=0.0)]
         labels = [_DEEP]
         tol = {x: Fraction(1, 10), y: Fraction(1, 1000)}
-        _merge_markers(witnesses, labels,
-                       [assn(x_0_0=0.05, y_0_0=0.01)], [_STRUCTURE_FRONTIER], [x, y],
-                       lambda v: tol[v], None)
+        _merge_markers(
+            witnesses,
+            labels,
+            [assn(x_0_0=0.05, y_0_0=0.01)],
+            [_STRUCTURE_FRONTIER],
+            [x, y],
+            lambda v: tol[v],
+            None,
+        )
         assert len(witnesses) == 2, "inside tol on x, outside on y -> distinct"
 
 
 # =================================================================== thinning
+
 
 def test_too_close_is_an_l_infinity_ball(x, y):
     pool = [assn(x_0_0=0.0, y_0_0=0.0)]
@@ -290,6 +376,7 @@ def test_too_close_is_an_l_infinity_ball(x, y):
 
 
 # =================================================================== helpers
+
 
 def _satisfies(formula, point):
     """Evaluate a block formula (an Or of strict inequalities) at a point."""
@@ -318,8 +405,9 @@ class FakeOracleFor:
     """conftest.FakeOracle for a single variable, with a readable signature."""
 
     def __new__(cls, var, lo, hi, undecided=None):
-        return FakeOracle({var: (Fraction(str(lo)), Fraction(str(hi)))},
-                          undecided=undecided)
+        return FakeOracle(
+            {var: (Fraction(str(lo)), Fraction(str(hi)))}, undecided=undecided
+        )
 
 
 class AlwaysUnknown:
@@ -349,6 +437,7 @@ class AlwaysUnknown:
 
 
 # =================================================================== verdicts
+
 
 class TestVerdict:
     """A verdict may never cover ground the run did not visit."""
@@ -380,6 +469,7 @@ class TestVerdict:
 
 # =================================================================== lattice
 
+
 class TestHarvestLattice:
     """The lattice pins every axis, so a witness lands in a known cell.
 
@@ -398,19 +488,26 @@ class TestHarvestLattice:
         got_l, req_l, _ = alg._harvest_lattice(lattice_oracle, box, theta, 8, 200)
         sweep_oracle = FakeOracle({x: (Fraction(0), Fraction(10))})
         got_s, req_s, _ = alg._harvest(
-            sweep_oracle, x, TRUE, Fraction(0), Fraction(1), Fraction(1, 10), 8,
-            Fraction(1, 20))
+            sweep_oracle,
+            x,
+            TRUE,
+            Fraction(0),
+            Fraction(1),
+            Fraction(1, 10),
+            8,
+            Fraction(1, 20),
+        )
 
         assert req_l == req_s
-        assert ([_value_of(w, x) for w in got_l]
-                == [_value_of(w, x) for w in got_s])
+        assert [_value_of(w, x) for w in got_l] == [_value_of(w, x) for w in got_s]
 
     def test_two_dimensions_query_the_product_grid(self, x, y):
         alg = RegionBoxDiscovery()
         box = {x: [Fraction(0), Fraction(1)], y: [Fraction(0), Fraction(1)]}
-        theta = _Theta(Fraction(1, 4))            # 4 cells per axis
-        oracle = FakeOracle({x: (Fraction(0), Fraction(10)),
-                             y: (Fraction(0), Fraction(10))})
+        theta = _Theta(Fraction(1, 4))  # 4 cells per axis
+        oracle = FakeOracle(
+            {x: (Fraction(0), Fraction(10)), y: (Fraction(0), Fraction(10))}
+        )
         got, requested, _ = alg._harvest_lattice(oracle, box, theta, 8, 200)
         assert requested == 16, "4 x 4 cells"
         assert len(got) == 16
@@ -419,8 +516,9 @@ class TestHarvestLattice:
         alg = RegionBoxDiscovery()
         box = {x: [Fraction(1), Fraction(2)], y: [Fraction(-1), Fraction(1)]}
         theta = _Theta(Fraction(1, 2))
-        oracle = FakeOracle({x: (Fraction(0), Fraction(10)),
-                             y: (Fraction(-10), Fraction(10))})
+        oracle = FakeOracle(
+            {x: (Fraction(0), Fraction(10)), y: (Fraction(-10), Fraction(10))}
+        )
         got, _, _ = alg._harvest_lattice(oracle, box, theta, 8, 200)
         assert got
         for witness in got:
@@ -430,9 +528,10 @@ class TestHarvestLattice:
     def test_cells_shrink_proportionally_under_the_cap(self, x, y):
         alg = RegionBoxDiscovery()
         box = {x: [Fraction(0), Fraction(1)], y: [Fraction(0), Fraction(1)]}
-        theta = _Theta(Fraction(1, 100))          # 100 cells per axis uncapped
-        oracle = FakeOracle({x: (Fraction(0), Fraction(10)),
-                             y: (Fraction(0), Fraction(10))})
+        theta = _Theta(Fraction(1, 100))  # 100 cells per axis uncapped
+        oracle = FakeOracle(
+            {x: (Fraction(0), Fraction(10)), y: (Fraction(0), Fraction(10))}
+        )
         _, requested, _ = alg._harvest_lattice(oracle, box, theta, 100, 50)
         assert requested <= 50, "the cap must bound the product"
         assert requested >= 25, "and must not collapse the lattice to a line"
@@ -441,9 +540,10 @@ class TestHarvestLattice:
         alg = RegionBoxDiscovery()
         box = {x: [Fraction(0), Fraction(1)], y: [Fraction(0), Fraction(1)]}
         theta = _Theta(Fraction(1, 2))
-        oracle = FakeOracle({x: (Fraction(0), Fraction(10)),
-                             y: (Fraction(0), Fraction(10))},
-                            undecided=covers(x, Fraction(1, 4)))
+        oracle = FakeOracle(
+            {x: (Fraction(0), Fraction(10)), y: (Fraction(0), Fraction(10))},
+            undecided=covers(x, Fraction(1, 4)),
+        )
         got, requested, undecided = alg._harvest_lattice(oracle, box, theta, 8, 200)
         assert undecided > 0
         assert len(got) + undecided == requested
@@ -457,15 +557,16 @@ class TestHarvestLattice:
         alg = RegionBoxDiscovery()
         box = {x: [Fraction(1), Fraction(1)], y: [Fraction(0), Fraction(1)]}
         theta = _Theta(Fraction(1, 4))
-        oracle = FakeOracle({x: (Fraction(0), Fraction(10)),
-                             y: (Fraction(0), Fraction(10))})
-        got, requested, undecided = alg._harvest_lattice(
-            oracle, box, theta, 8, 200)
+        oracle = FakeOracle(
+            {x: (Fraction(0), Fraction(10)), y: (Fraction(0), Fraction(10))}
+        )
+        got, requested, undecided = alg._harvest_lattice(oracle, box, theta, 8, 200)
         assert requested == 4, "1 cell on the pinned axis x 4 on the live one"
         assert len(got) == 4
         for witness in got:
             assert abs(_value_of(witness, x) - 1) <= Fraction(1, 8), (
-                "the degenerate axis samples at its pivot value +/- theta/2")
+                "the degenerate axis samples at its pivot value +/- theta/2"
+            )
 
     def test_the_cap_reduction_does_not_compound(self):
         """Greedy one-cell decrements, not a uniform floored shrink: five axes
@@ -474,7 +575,7 @@ class TestHarvestLattice:
         alg = RegionBoxDiscovery()
         axes = [Real(f"v{i}_0_0") for i in range(5)]
         box = {v: [Fraction(0), Fraction(3, 4)] for v in axes}
-        theta = _Theta(Fraction(1, 4))            # 3 cells per axis uncapped
+        theta = _Theta(Fraction(1, 4))  # 3 cells per axis uncapped
         oracle = FakeOracle({v: (Fraction(0), Fraction(10)) for v in axes})
         _, requested, _ = alg._harvest_lattice(oracle, box, theta, 8, 200)
         assert requested == 162
@@ -483,6 +584,7 @@ class TestHarvestLattice:
         """The docstring promised a report and none was printed: a capped
         harvest read as "covered everything", against the no-silent-caps
         rule. The line carries before, after, and per-axis counts."""
+
         class _Recorder:
             lines = []
 
@@ -491,12 +593,14 @@ class TestHarvestLattice:
 
             def print_verbose(self, msg):
                 self.lines.append(msg)
+
         alg = RegionBoxDiscovery()
         alg._printer = _Recorder()
         box = {x: [Fraction(0), Fraction(1)], y: [Fraction(0), Fraction(1)]}
-        theta = _Theta(Fraction(1, 100))          # 100 x 100 uncapped
-        oracle = FakeOracle({x: (Fraction(0), Fraction(10)),
-                             y: (Fraction(0), Fraction(10))})
+        theta = _Theta(Fraction(1, 100))  # 100 x 100 uncapped
+        oracle = FakeOracle(
+            {x: (Fraction(0), Fraction(10)), y: (Fraction(0), Fraction(10))}
+        )
         _, requested, _ = alg._harvest_lattice(oracle, box, theta, 100, 50)
         assert requested <= 50
         capped = [line for line in _Recorder.lines if "lattice capped" in line]
@@ -504,6 +608,7 @@ class TestHarvestLattice:
 
 
 # ====================================================== the shared procedure
+
 
 class TestGrowBoxUnderEitherOracle:
     """_grow_box is one procedure for an exact and a partial oracle.
@@ -519,6 +624,7 @@ class TestGrowBoxUnderEitherOracle:
         class _Encoding:
             range_dict = {Real(v.id[:-4]): (True, "0", "10", True) for v in box_vars}
             bound = 1
+
         return _Encoding()
 
     @staticmethod
@@ -529,12 +635,21 @@ class TestGrowBoxUnderEitherOracle:
         alg = RegionBoxDiscovery()
         alg._config = None
         pivot = self._pivot(x_0_0=5)
-        return alg._grow_box(oracle, pivot, self._encoding([Real("x_0_0")]),
-                             theta, iters, 1, budget, _SilentPrinter())
+        return alg._grow_box(
+            oracle,
+            pivot,
+            self._encoding([Real("x_0_0")]),
+            theta,
+            iters,
+            1,
+            budget,
+            _SilentPrinter(),
+        )
 
     def test_a_partial_oracle_yields_a_labeled_box(self, x):
-        oracle = FakeOracle({x: (Fraction(4), Fraction(6))},
-                            tolerance=Fraction(1, 1000))
+        oracle = FakeOracle(
+            {x: (Fraction(4), Fraction(6))}, tolerance=Fraction(1, 1000)
+        )
         witnesses, labels, box = self._grow(oracle, _Theta(Fraction(1, 4)))
         assert witnesses and len(witnesses) == len(labels)
         assert set(labels) <= {_DEEP, _STRUCTURE_FRONTIER, _IC_DOMAIN}
@@ -546,32 +661,38 @@ class TestGrowBoxUnderEitherOracle:
         theta = _Theta(Fraction(1, 4))
         exact = FakeOracle({x: (Fraction(4), Fraction(6))}, tolerance=Fraction(0))
         exact.is_exact = True
-        partial = FakeOracle({x: (Fraction(4), Fraction(6))},
-                             tolerance=Fraction(1, 1000))
+        partial = FakeOracle(
+            {x: (Fraction(4), Fraction(6))}, tolerance=Fraction(1, 1000)
+        )
         _, _, box_exact = self._grow(exact, theta, iters=12)
         _, _, box_partial = self._grow(partial, theta)
         assert abs(box_exact[x][1] - 6) <= abs(box_partial[x][1] - 6)
 
     def test_undecided_probes_do_not_produce_a_wrong_box(self, x):
         """Whatever the oracle refuses to decide, the box stays falsifying."""
-        oracle = FakeOracle({x: (Fraction(4), Fraction(6))},
-                            undecided=beyond(x, Fraction(11, 2)),
-                            tolerance=Fraction(1, 1000))
+        oracle = FakeOracle(
+            {x: (Fraction(4), Fraction(6))},
+            undecided=beyond(x, Fraction(11, 2)),
+            tolerance=Fraction(1, 1000),
+        )
         witnesses, labels, box = self._grow(oracle, _Theta(Fraction(1, 4)))
         lo, hi = box[x]
         assert Fraction(4) <= lo and hi <= Fraction(6), (
-            "an undecided probe must cost extent, never correctness")
+            "an undecided probe must cost extent, never correctness"
+        )
         for witness in witnesses:
             value = _value_of(witness, x)
             assert Fraction(4) <= value <= Fraction(6)
 
     def test_witnesses_are_theta_separated_under_a_partial_oracle(self, x):
         theta = _Theta(Fraction(1, 4))
-        oracle = FakeOracle({x: (Fraction(4), Fraction(6))},
-                            tolerance=Fraction(1, 1000))
+        oracle = FakeOracle(
+            {x: (Fraction(4), Fraction(6))}, tolerance=Fraction(1, 1000)
+        )
         witnesses, labels, _ = self._grow(oracle, theta, budget=8)
-        deep = sorted(_value_of(w, x)
-                      for w, label in zip(witnesses, labels) if label == _DEEP)
+        deep = sorted(
+            _value_of(w, x) for w, label in zip(witnesses, labels) if label == _DEEP
+        )
         gaps = [b - a for a, b in zip(deep, deep[1:])]
         assert all(g >= Fraction(1, 4) for g in gaps), gaps
 
@@ -583,9 +704,11 @@ class _SilentPrinter:
     def print_verbose(self, *_a, **_k):
         pass
 
+
 # ================================================== the pruning policy itself
 
 # ============================================== which bound the search hit
+
 
 class TestBindingBound:
     """A budget-exhausted search must name the key that actually bounded it.
@@ -617,6 +740,7 @@ class TestBindingBound:
 
 
 # ====================================================== the two-step search
+
 
 class _ScriptedCandidate:
     """The inner ODE-feasibility oracle for one candidate, with its verdict and
@@ -751,11 +875,11 @@ class TestBlocksBindThePivotNotGrowth:
         alg = _ScriptedExact(SAT)
         alg._underlying = "z3"
         alg._config = _GenConfig()
-        oracle, pivot, _ = alg._pivot_at(_OneDepthEncoder(), 0, "LRA", 0,
-                                         [block])
+        oracle, pivot, _ = alg._pivot_at(_OneDepthEncoder(), 0, "LRA", 0, [block])
         assert pivot is not None
         assert any(f is block for f in oracle.asserted), (
-            "the pivot query must see the block")
+            "the pivot query must see the block"
+        )
 
     def test_exact_growth_is_not_walled_by_the_blocks(self):
         block = _block_box({Real("x1_0_0"): (Fraction(0), Fraction(1))})
@@ -764,7 +888,8 @@ class TestBlocksBindThePivotNotGrowth:
         alg._config = _GenConfig()
         oracle, _, _ = alg._pivot_at(_OneDepthEncoder(), 0, "LRA", 0, [block])
         assert not any(f is block for f in oracle.live), (
-            "the block frame must be popped before the oracle grows the box")
+            "the block frame must be popped before the oracle grows the box"
+        )
 
     def test_exact_no_pivot_still_pops_and_records_the_verdict(self):
         for verdict in (UNSAT, UNKNOWN):
@@ -772,11 +897,11 @@ class TestBlocksBindThePivotNotGrowth:
             alg = _ScriptedExact(verdict)
             alg._underlying = "z3"
             alg._config = _GenConfig()
-            oracle, pivot, _ = alg._pivot_at(_OneDepthEncoder(), 0, "LRA", 0,
-                                             [block])
+            oracle, pivot, _ = alg._pivot_at(_OneDepthEncoder(), 0, "LRA", 0, [block])
             assert pivot is None
             assert alg._last_pivot_verdict == verdict
             assert not any(f is block for f in alg.oracle.live)
+
 
 class TestValidateGen:
     """Range checks run before the first solver call.
@@ -801,11 +926,21 @@ class TestValidateGen:
         validate_gen(_GenConfig())
 
     def test_a_populated_valid_configuration_passes(self):
-        validate_gen(_GenConfig(epsilon="0.001", epsilon_relative="0.01",
-                                k_ic="3", k_witness="8", word_rotate="0",
-                                pivot_budget="1800", pivot_timeout="60",
-                                query_timeout='"off"', bisect_iters="0",
-                                log_every="1", thin_ic="0"))
+        validate_gen(
+            _GenConfig(
+                epsilon="0.001",
+                epsilon_relative="0.01",
+                k_ic="3",
+                k_witness="8",
+                word_rotate="0",
+                pivot_budget="1800",
+                pivot_timeout="60",
+                query_timeout='"off"',
+                bisect_iters="0",
+                log_every="1",
+                thin_ic="0",
+            )
+        )
 
     def test_zero_epsilon_is_rejected_with_the_reason(self):
         assert "never terminates" in self._rejects(epsilon="0")
@@ -858,6 +993,7 @@ class TestPivotMetricsAndClamp:
         assert alg._metrics["candidates"] == 1
         assert alg._metrics["accepted"] == 0
 
+
 class TestICDomainEdgeLabeling:
     """A face reaching the effective IC-domain edge is a domain face; a bracket
     strictly interior to it is a structure-frontier.
@@ -876,6 +1012,7 @@ class TestICDomainEdgeLabeling:
         class _Enc:
             range_dict = {Real("x"): (True, "0", "10", True)}
             bound = 1
+
         return _Enc()
 
     def _labels(self, falsifying, domain_label, x):
@@ -883,25 +1020,34 @@ class TestICDomainEdgeLabeling:
         alg = RegionBoxDiscovery()
         alg._config = None
         _, labels, _ = alg._grow_box(
-            oracle, assn(x_0_0=5), self._encoding(),
-            _Theta(Fraction(1, 4)), 20, 1, 4, _SilentPrinter(),
-            axis_ids=["x_0_0"], ic_edges={"x_0_0": (Fraction(0), Fraction(10))},
-            domain_label=domain_label)
+            oracle,
+            assn(x_0_0=5),
+            self._encoding(),
+            _Theta(Fraction(1, 4)),
+            20,
+            1,
+            4,
+            _SilentPrinter(),
+            axis_ids=["x_0_0"],
+            ic_edges={"x_0_0": (Fraction(0), Fraction(10))},
+            domain_label=domain_label,
+        )
         return labels
 
     def test_reaching_the_edge_is_a_domain_face(self, x):
         # Falsifying to within tol of both IC edges (0 and 10): both faces are
         # domain faces, none an interior crossing.
         labels = self._labels(
-            (Fraction(1, 10000), Fraction(10) - Fraction(1, 4000)), _IC_DOMAIN, x)
+            (Fraction(1, 10000), Fraction(10) - Fraction(1, 4000)), _IC_DOMAIN, x
+        )
         assert _IC_DOMAIN in labels and _STRUCTURE_FRONTIER not in labels
 
     def test_the_domain_label_is_the_plan_label(self, x):
         # An initial set that is not a certified box labels its domain faces
         # projected-domain, never ic-domain.
         labels = self._labels(
-            (Fraction(1, 10000), Fraction(10) - Fraction(1, 4000)),
-            _PROJECTED_DOMAIN, x)
+            (Fraction(1, 10000), Fraction(10) - Fraction(1, 4000)), _PROJECTED_DOMAIN, x
+        )
         assert _PROJECTED_DOMAIN in labels and _IC_DOMAIN not in labels
 
     def test_stopping_interior_is_a_structure_frontier(self, x):
@@ -916,13 +1062,14 @@ def test_ic_pivots_are_sorted_by_variable_id():
     """_grow_box grows greedily in one pass, so its axis order is part of the
     geometry; the model dict arrives in solver order, which no seed pins."""
     from stlmc.generation.box import _ic_pivots
+
     range_dict = {Real("b"): None, Real("a"): None, Real("c"): None}
     model = assn(c_0_0=3, a_0_0=1, b_0_0=2)
-    assert [v.id for v in _ic_pivots(model, range_dict)] == [
-        "a_0_0", "b_0_0", "c_0_0"]
+    assert [v.id for v in _ic_pivots(model, range_dict)] == ["a_0_0", "b_0_0", "c_0_0"]
 
 
 # ============================================= partial-face witness separation
+
 
 class TestPartialFaceWitnessSeparation:
     """A partial face contributes a deep witness, not an exempt marker.
@@ -939,42 +1086,50 @@ class TestPartialFaceWitnessSeparation:
         class _Enc:
             range_dict = {Real("x"): (True, "0", "10", True)}
             bound = 1
+
         return _Enc()
 
     def _grow(self, oracle, theta):
         alg = RegionBoxDiscovery()
         alg._config = None
-        return alg._grow_box(oracle, assn(x_0_0=5), self._encoding(),
-                             theta, 20, 1, 4, _SilentPrinter())
+        return alg._grow_box(
+            oracle, assn(x_0_0=5), self._encoding(), theta, 20, 1, 4, _SilentPrinter()
+        )
 
     def test_a_partial_witness_within_theta_of_the_pivot_is_dropped(self, x):
         # Undecided at or beyond 5.7 lets the +face confirm a little growth (to
         # ~5.6) and then stop partial, within theta = 1 of the pivot at 5. The
         # partial witness carries nothing the pivot does not and must be dropped.
-        oracle = FakeOracle({x: (Fraction(4), Fraction(6))},
-                            undecided=beyond(x, Fraction(57, 10)),
-                            tolerance=Fraction(1, 1000))
+        oracle = FakeOracle(
+            {x: (Fraction(4), Fraction(6))},
+            undecided=beyond(x, Fraction(57, 10)),
+            tolerance=Fraction(1, 1000),
+        )
         witnesses, labels, _ = self._grow(oracle, _Theta(Fraction(1)))
-        deep = sorted(_value_of(w, x)
-                      for w, label in zip(witnesses, labels) if label == _DEEP)
+        deep = sorted(
+            _value_of(w, x) for w, label in zip(witnesses, labels) if label == _DEEP
+        )
         gaps = [b - a for a, b in zip(deep, deep[1:])]
         assert all(g >= Fraction(1) for g in gaps), (
-            "deep witnesses closer than theta: "
-            f"{[float(d) for d in deep]}")
+            f"deep witnesses closer than theta: {[float(d) for d in deep]}"
+        )
 
     def test_an_exempt_frontier_marker_within_theta_still_survives(self, x):
         # The -face brackets a real frontier near 4; its structure-frontier
         # marker is exempt from separation and must be kept even on a narrow box,
         # since its
         # position is the frontier it reports.
-        oracle = FakeOracle({x: (Fraction(4), Fraction(6))},
-                            undecided=beyond(x, Fraction(57, 10)),
-                            tolerance=Fraction(1, 1000))
+        oracle = FakeOracle(
+            {x: (Fraction(4), Fraction(6))},
+            undecided=beyond(x, Fraction(57, 10)),
+            tolerance=Fraction(1, 1000),
+        )
         _, labels, _ = self._grow(oracle, _Theta(Fraction(1)))
         assert _STRUCTURE_FRONTIER in labels, "an exempt frontier marker must survive"
 
 
 # ================================================= harvest window delta floor
+
 
 class _WindowRecorder(FakeOracle):
     """Records the width of every per-axis window a check() is issued under."""
@@ -1002,27 +1157,31 @@ class TestHarvestWindowDeltaFloor:
 
     def test_lattice_window_is_floored_at_delta(self, x, y):
         delta = Fraction(1, 1000)
-        theta = _Theta(Fraction(1, 1_000_000))       # far below delta
+        theta = _Theta(Fraction(1, 1_000_000))  # far below delta
         box = {x: [Fraction(0), Fraction(1)], y: [Fraction(0), Fraction(1)]}
-        oracle = _WindowRecorder({x: (Fraction(0), Fraction(10)),
-                                  y: (Fraction(0), Fraction(10))},
-                                 tolerance=delta)
+        oracle = _WindowRecorder(
+            {x: (Fraction(0), Fraction(10)), y: (Fraction(0), Fraction(10))},
+            tolerance=delta,
+        )
         RegionBoxDiscovery()._harvest_lattice(oracle, box, theta, 2, 200)
         assert oracle.widths
         assert min(oracle.widths) >= delta, (
-            f"window {float(min(oracle.widths))} is below delta {float(delta)}")
+            f"window {float(min(oracle.widths))} is below delta {float(delta)}"
+        )
 
     def test_an_exact_oracle_window_is_unchanged(self, x):
         theta = _Theta(Fraction(1, 10))
         box = {x: [Fraction(0), Fraction(1)]}
-        oracle = _WindowRecorder({x: (Fraction(0), Fraction(10))},
-                                 tolerance=Fraction(0))
+        oracle = _WindowRecorder(
+            {x: (Fraction(0), Fraction(10))}, tolerance=Fraction(0)
+        )
         oracle.is_exact = True
         RegionBoxDiscovery()._harvest_lattice(oracle, box, theta, 8, 200)
         assert oracle.widths and max(oracle.widths) == Fraction(1, 10)
 
 
 # ================================================== two-step backend capability
+
 
 class TestTwoStepBackendGuard:
     """The two-step pivot search is sound only under dReal.
@@ -1052,18 +1211,26 @@ class TestTwoStepBackendGuard:
         _, pivot, _ = alg._pivot_at(_OneDepthEncoder(), 0, "LRA", 0, [])
         assert pivot is not None
 
+
 # ============================================== the initial-condition detector
+
 
 class TestConstValue:
     """The numeric shapes an ``init`` bound can carry."""
 
-    @pytest.mark.parametrize("node, expected", [
-        (RealVal("2.5"), Fraction(5, 2)),
-        (IntVal("3"), Fraction(3)),
-        (Neg(RealVal("0.2")), Fraction(-1, 5)),   # `- 0.2` parses to Neg(RealVal(...))
-        (Real("y"), None),                        # a variable is not a constant
-        (BoolVal("True"), None),                  # a boolean is not numeric
-    ])
+    @pytest.mark.parametrize(
+        "node, expected",
+        [
+            (RealVal("2.5"), Fraction(5, 2)),
+            (IntVal("3"), Fraction(3)),
+            (
+                Neg(RealVal("0.2")),
+                Fraction(-1, 5),
+            ),  # `- 0.2` parses to Neg(RealVal(...))
+            (Real("y"), None),  # a variable is not a constant
+            (BoolVal("True"), None),  # a boolean is not numeric
+        ],
+    )
     def test_a_const_reads_as_its_value_or_none(self, node, expected):
         assert _const_value(node) == expected
 
@@ -1073,17 +1240,20 @@ class TestAxisBound:
 
     ids = {"y", "psi"}
 
-    @pytest.mark.parametrize("conjunct, expected", [
-        (Leq(Real("y"), RealVal("2.5")), ("y", None, Fraction(5, 2))),
-        (Geq(Real("y"), RealVal("0.5")), ("y", Fraction(1, 2), None)),
-        (Leq(RealVal("0.5"), Real("y")), ("y", Fraction(1, 2), None)),  # 0.5<=y
-        (Geq(RealVal("3"), Real("y")), ("y", None, Fraction(3))),       # 3>=y
-        (Eq(Real("y"), RealVal("0")), ("y", Fraction(0), Fraction(0))),  # eq pins
-        (Leq(Neg(RealVal("0.2")), Real("y")), ("y", Fraction(-1, 5), None)),
-        (Eq(Int("m"), RealVal("0")), None),          # not a declared axis
-        (Leq(Real("y"), Real("psi")), None),         # couples two vars
-        (Not(Bool("r")), None),                      # a boolean literal is not a bound
-    ])
+    @pytest.mark.parametrize(
+        "conjunct, expected",
+        [
+            (Leq(Real("y"), RealVal("2.5")), ("y", None, Fraction(5, 2))),
+            (Geq(Real("y"), RealVal("0.5")), ("y", Fraction(1, 2), None)),
+            (Leq(RealVal("0.5"), Real("y")), ("y", Fraction(1, 2), None)),  # 0.5<=y
+            (Geq(RealVal("3"), Real("y")), ("y", None, Fraction(3))),  # 3>=y
+            (Eq(Real("y"), RealVal("0")), ("y", Fraction(0), Fraction(0))),  # eq pins
+            (Leq(Neg(RealVal("0.2")), Real("y")), ("y", Fraction(-1, 5), None)),
+            (Eq(Int("m"), RealVal("0")), None),  # not a declared axis
+            (Leq(Real("y"), Real("psi")), None),  # couples two vars
+            (Not(Bool("r")), None),  # a boolean literal is not a bound
+        ],
+    )
     def test_one_conjunct_reads_as_a_per_axis_bound(self, conjunct, expected):
         assert _axis_bound(conjunct, self.ids) == expected
 
@@ -1091,21 +1261,30 @@ class TestAxisBound:
 class TestInitProjection:
     """``init`` read as per-axis windows, and whether it is a certified box."""
 
-    rd = {Real("y"): (True, "0", "10", True),
-          Real("psi"): (True, "-5", "5", True)}
+    rd = {Real("y"): (True, "0", "10", True), Real("psi"): (True, "-5", "5", True)}
 
     def test_a_pure_per_axis_conjunction_is_a_box(self):
-        init = And([Geq(Real("y"), RealVal("0.5")), Leq(Real("y"), RealVal("2.5")),
-                    Leq(RealVal("0.1"), Real("psi")),
-                    Leq(Real("psi"), RealVal("0.7"))])
+        init = And(
+            [
+                Geq(Real("y"), RealVal("0.5")),
+                Leq(Real("y"), RealVal("2.5")),
+                Leq(RealVal("0.1"), Real("psi")),
+                Leq(Real("psi"), RealVal("0.7")),
+            ]
+        )
         per, is_box = _init_projection(init, self.rd)
         assert is_box
         assert per["y_0_0"] == [Fraction(1, 2), Fraction(5, 2)]
         assert per["psi_0_0"] == [Fraction(1, 10), Fraction(7, 10)]
 
     def test_a_mode_pin_clears_the_box_but_keeps_the_projection(self):
-        init = And([Eq(Int("m"), RealVal("0")),
-                    Geq(Real("y"), RealVal("0.5")), Leq(Real("y"), RealVal("2.5"))])
+        init = And(
+            [
+                Eq(Int("m"), RealVal("0")),
+                Geq(Real("y"), RealVal("0.5")),
+                Leq(Real("y"), RealVal("2.5")),
+            ]
+        )
         per, is_box = _init_projection(init, self.rd)
         assert not is_box
         assert per["y_0_0"] == [Fraction(1, 2), Fraction(5, 2)]
@@ -1116,8 +1295,7 @@ class TestInitProjection:
         assert not is_box
 
     def test_a_relational_conjunct_clears_the_box(self):
-        init = And([Leq(Real("y"), Real("psi")),
-                    Geq(Real("y"), RealVal("0.5"))])
+        init = And([Leq(Real("y"), Real("psi")), Geq(Real("y"), RealVal("0.5"))])
         _, is_box = _init_projection(init, self.rd)
         assert not is_box
 
@@ -1132,13 +1310,21 @@ class TestInitProjection:
         assert per["y_0_0"] == [Fraction(0), Fraction(0)]
 
 
-@pytest.mark.parametrize("raw, expected", [
-    ("y/0.5/2.5/psi/0.1/0.7", {"y_0_0": (Fraction(1, 2), Fraction(5, 2)),
-                               "psi_0_0": (Fraction(1, 10), Fraction(7, 10))}),
-    ("r/-0.2/0.6", {"r_0_0": (Fraction(-1, 5), Fraction(3, 5))}),  # a negative edge
-    ("", {}),
-    (None, {}),
-])
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        (
+            "y/0.5/2.5/psi/0.1/0.7",
+            {
+                "y_0_0": (Fraction(1, 2), Fraction(5, 2)),
+                "psi_0_0": (Fraction(1, 10), Fraction(7, 10)),
+            },
+        ),
+        ("r/-0.2/0.6", {"r_0_0": (Fraction(-1, 5), Fraction(3, 5))}),  # a negative edge
+        ("", {}),
+        (None, {}),
+    ],
+)
 def test_parse_target_bounds(raw, expected):
     assert _parse_target_bounds(raw) == expected
 
@@ -1146,14 +1332,21 @@ def test_parse_target_bounds(raw, expected):
 class TestPreferLabel:
     """An interior frontier is the stronger claim; a domain edge outranks deep."""
 
-    @pytest.mark.parametrize("current, incoming, expected", [
-        (_IC_DOMAIN, _STRUCTURE_FRONTIER, _STRUCTURE_FRONTIER),   # frontier either way
-        (_STRUCTURE_FRONTIER, _IC_DOMAIN, _STRUCTURE_FRONTIER),
-        (_PROJECTED_DOMAIN, _STRUCTURE_FRONTIER, _STRUCTURE_FRONTIER),
-        (_DEEP, _IC_DOMAIN, _IC_DOMAIN),                          # edge outranks deep
-        (_DEEP, _PROJECTED_DOMAIN, _PROJECTED_DOMAIN),
-        (_IC_DOMAIN, _PROJECTED_DOMAIN, _IC_DOMAIN),              # equal rank
-    ])
+    @pytest.mark.parametrize(
+        "current, incoming, expected",
+        [
+            (
+                _IC_DOMAIN,
+                _STRUCTURE_FRONTIER,
+                _STRUCTURE_FRONTIER,
+            ),  # frontier either way
+            (_STRUCTURE_FRONTIER, _IC_DOMAIN, _STRUCTURE_FRONTIER),
+            (_PROJECTED_DOMAIN, _STRUCTURE_FRONTIER, _STRUCTURE_FRONTIER),
+            (_DEEP, _IC_DOMAIN, _IC_DOMAIN),  # edge outranks deep
+            (_DEEP, _PROJECTED_DOMAIN, _PROJECTED_DOMAIN),
+            (_IC_DOMAIN, _PROJECTED_DOMAIN, _IC_DOMAIN),  # equal rank
+        ],
+    )
     def test_prefer_label(self, current, incoming, expected):
         assert _prefer_label(current, incoming) == expected
 
@@ -1166,20 +1359,32 @@ class _Model:
         self.range_dict = range_dict
 
 
-_BOX_RD = {Real("x"): (True, "0", "10", True), Real("y"): (True, "-6", "6", True),
-           Real("psi"): (True, "-1.5", "1.5", True),
-           Real("r"): (True, "-1.5", "1.5", True),
-           Real("Vc"): (True, "-0.5", "0.5", True)}
+_BOX_RD = {
+    Real("x"): (True, "0", "10", True),
+    Real("y"): (True, "-6", "6", True),
+    Real("psi"): (True, "-1.5", "1.5", True),
+    Real("r"): (True, "-1.5", "1.5", True),
+    Real("Vc"): (True, "-0.5", "0.5", True),
+}
 
 
 def _boxed_init():
     """An initial condition with a mode pin, one pinned axis, and four per-axis
     interval bounds (one with a negated lower edge)."""
-    return And([Eq(Int("m"), RealVal("0")), Eq(Real("x"), RealVal("0")),
-                Leq(RealVal("0.5"), Real("y")), Leq(Real("y"), RealVal("2.5")),
-                Leq(RealVal("0.1"), Real("psi")), Leq(Real("psi"), RealVal("0.7")),
-                Leq(Neg(RealVal("0.2")), Real("r")), Leq(Real("r"), RealVal("0.6")),
-                Leq(RealVal("0"), Real("Vc")), Leq(Real("Vc"), RealVal("0.2"))])
+    return And(
+        [
+            Eq(Int("m"), RealVal("0")),
+            Eq(Real("x"), RealVal("0")),
+            Leq(RealVal("0.5"), Real("y")),
+            Leq(Real("y"), RealVal("2.5")),
+            Leq(RealVal("0.1"), Real("psi")),
+            Leq(Real("psi"), RealVal("0.7")),
+            Leq(Neg(RealVal("0.2")), Real("r")),
+            Leq(Real("r"), RealVal("0.6")),
+            Leq(RealVal("0"), Real("Vc")),
+            Leq(Real("Vc"), RealVal("0.2")),
+        ]
+    )
 
 
 class TestICPlan:
@@ -1206,7 +1411,8 @@ class TestICPlan:
     def test_config_target_axes_is_authoritative_ic_domain(self):
         cfg = _GenConfig(
             target_axes="y/psi/r/Vc",
-            target_bounds="y/0.5/2.5/psi/0.1/0.7/r/-0.2/0.6/Vc/0/0.2")
+            target_bounds="y/0.5/2.5/psi/0.1/0.7/r/-0.2/0.6/Vc/0/0.2",
+        )
         axes, edges, label = _ic_plan(cfg, self._model())
         assert label == _IC_DOMAIN
         assert "x_0_0" not in axes
@@ -1215,7 +1421,8 @@ class TestICPlan:
 
     def test_config_axes_without_bounds_fall_back_to_the_init_projection(self):
         axes, edges, label = _ic_plan(
-            _GenConfig(target_axes="y/psi/r/Vc"), self._model())
+            _GenConfig(target_axes="y/psi/r/Vc"), self._model()
+        )
         assert label == _IC_DOMAIN
         assert edges["y_0_0"] == (Fraction(1, 2), Fraction(5, 2))
 
@@ -1230,7 +1437,7 @@ class TestICPlan:
         rd = {Real("y"): (True, "-6", "6", True), Real("z"): (True, "0", "4", True)}
         init = And([Leq(RealVal("0.5"), Real("y")), Leq(Real("y"), RealVal("2.5"))])
         _, edges, _ = _ic_plan(_GenConfig(), _Model(init, rd))
-        assert edges["z_0_0"] == (Fraction(0), Fraction(4))       # declared
+        assert edges["z_0_0"] == (Fraction(0), Fraction(4))  # declared
 
 
 class TestValidateTargetKeys:
@@ -1245,9 +1452,12 @@ class TestValidateTargetKeys:
         raise AssertionError(f"{gen} must be rejected")
 
     def test_a_valid_pair_passes(self):
-        validate_gen(_GenConfig(
-            target_axes="y/psi/r/Vc",
-            target_bounds="y/0.5/2.5/psi/0.1/0.7/r/-0.2/0.6/Vc/0/0.2"))
+        validate_gen(
+            _GenConfig(
+                target_axes="y/psi/r/Vc",
+                target_bounds="y/0.5/2.5/psi/0.1/0.7/r/-0.2/0.6/Vc/0/0.2",
+            )
+        )
 
     def test_empty_target_axes_is_rejected(self):
         assert "target-axes" in self._rejects(target_axes="")

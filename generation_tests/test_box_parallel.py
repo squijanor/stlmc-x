@@ -20,6 +20,7 @@ Verdicts are keyed to a candidate's identity (its total_const), not to the order
 the oracles are constructed, so completion order can be shuffled with per-word
 delays without mispairing a verdict.
 """
+
 import os
 import threading
 import time
@@ -58,10 +59,14 @@ class _Section:
 
 class _Config:
     """A [gen] section plus an optional [common] section carrying parallel-core."""
+
     def __init__(self, common=None, **gen):
         self._gen = _Section({k.replace("_", "-"): v for k, v in gen.items()})
-        self._common = None if common is None else _Section(
-            {k.replace("_", "-"): v for k, v in common.items()})
+        self._common = (
+            None
+            if common is None
+            else _Section({k.replace("_", "-"): v for k, v in common.items()})
+        )
 
     def is_section_in(self, name):
         return name == "gen" or (name == "common" and self._common is not None)
@@ -83,8 +88,13 @@ def _tag(word):
 
 
 def _new_ledger():
-    return {"lock": threading.Lock(), "checked": [], "built": [],
-            "active": 0, "max_active": 0}
+    return {
+        "lock": threading.Lock(),
+        "checked": [],
+        "built": [],
+        "active": 0,
+        "max_active": 0,
+    }
 
 
 @pytest.fixture(autouse=True)
@@ -104,6 +114,7 @@ class _PivotSearch:
     blocks it structure-wide, as the real ``next`` does, then ``None`` once
     spent. ``model`` is None by default, which disables the feasibility filter;
     a test that exercises the filter sets it truthy and patches the filter."""
+
     def __init__(self, words, exhausted=UNSAT):
         self._words = list(words)
         self._i = 0
@@ -124,8 +135,7 @@ class _PivotSearch:
         word = self._words[self._i]
         self._i += 1
         total = Bool(_tag(word))
-        assn = {Real(f"currentMode_{k}"): RealVal(str(d))
-                for k, d in enumerate(word)}
+        assn = {Real(f"currentMode_{k}"): RealVal(str(d)) for k, d in enumerate(word)}
         self.add_block(Not(total))  # structure-wide, mirroring the real next()
         return total, total, assn
 
@@ -134,6 +144,7 @@ class _Candidate:
     """A candidate oracle whose verdict and completion delay are looked up from
     the total_const it is asked to verify, so a thread completing out of
     proposal order still returns that candidate's scripted verdict."""
+
     def __init__(self, verdicts, delays, ledger):
         self._verdicts = verdicts
         self._delays = delays
@@ -167,7 +178,8 @@ class _Candidate:
         with self._ledger["lock"]:
             self._ledger["active"] += 1
             self._ledger["max_active"] = max(
-                self._ledger["max_active"], self._ledger["active"])
+                self._ledger["max_active"], self._ledger["active"]
+            )
         try:
             delay = self._delays.get(self.tag, 0.0)
             if delay:
@@ -201,17 +213,26 @@ class _ScriptedBox(RegionBoxDiscovery):
         return oracle
 
 
-def _run(words, verdicts, *, delays=None, workers=None, blocks=(),
-         exhausted=UNSAT, budget="30", timeout="45"):
+def _run(
+    words,
+    verdicts,
+    *,
+    delays=None,
+    workers=None,
+    blocks=(),
+    exhausted=UNSAT,
+    budget="30",
+    timeout="45",
+):
     vmap = {_tag(w): v for w, v in verdicts.items()}
     dmap = {_tag(w): d for w, d in (delays or {}).items()}
     search = _PivotSearch(words, exhausted=exhausted)
     alg = _ScriptedBox(search, vmap, dmap)
     alg._printer = _SilentPrinter()
-    common = (None if workers is None
-              else {"parallel": "true", "parallel-core": str(workers)})
-    alg._config = _Config(common=common, pivot_budget=budget,
-                          pivot_timeout=timeout)
+    common = (
+        None if workers is None else {"parallel": "true", "parallel-core": str(workers)}
+    )
+    alg._config = _Config(common=common, pivot_budget=budget, pivot_timeout=timeout)
     alg._logger = None
     alg._tau_max = "8"
     alg._underlying = "dreal"
@@ -232,7 +253,7 @@ def test_earliest_proposed_sat_is_accepted_despite_later_proposal_finishing_firs
     alg, (oracle, model, _) = _run(
         ["0", "1", "2", "3"],
         {"0": UNSAT, "1": SAT, "2": SAT, "3": UNSAT},
-        delays={"1": 0.20},          # word 1 (earliest SAT) completes last
+        delays={"1": 0.20},  # word 1 (earliest SAT) completes last
         workers=4,
     )
     assert oracle is not None
@@ -248,7 +269,9 @@ def test_completion_order_does_not_change_the_accepted_candidate():
         alg, (oracle, model, _) = _run(
             ["0", "1", "2", "3"],
             {"0": UNSAT, "1": SAT, "2": SAT, "3": SAT},
-            delays=delays, workers=4)
+            delays=delays,
+            workers=4,
+        )
         assert model["tag"] == _tag("1"), delays
 
 
@@ -257,8 +280,7 @@ def test_completion_order_does_not_change_the_accepted_candidate():
 # --------------------------------------------------------------------------- #
 def test_serial_and_wide_pool_agree_on_candidate_and_counters():
     words = ["0", "1", "2", "3", "4", "5"]
-    verdicts = {"0": UNSAT, "1": UNKNOWN, "2": UNSAT,
-                "3": SAT, "4": UNKNOWN, "5": SAT}
+    verdicts = {"0": UNSAT, "1": UNKNOWN, "2": UNSAT, "3": SAT, "4": UNKNOWN, "5": SAT}
     serial, (o1, m1, _) = _run(words, verdicts, workers=1)
     wide, (o2, m2, _) = _run(words, verdicts, workers=8)
     assert m1["tag"] == m2["tag"] == _tag("3")
@@ -274,8 +296,7 @@ def test_serial_and_wide_pool_agree_on_candidate_and_counters():
 def test_absent_common_section_defaults_to_serial():
     # No [common] section: parallel-core cannot be read, so the pool is 1 and
     # the loop still decides correctly.
-    alg, (oracle, model, _) = _run(
-        ["0", "1"], {"0": UNSAT, "1": SAT}, workers=None)
+    alg, (oracle, model, _) = _run(["0", "1"], {"0": UNSAT, "1": SAT}, workers=None)
     assert model["tag"] == _tag("1")
     assert alg._metrics["candidates"] == 2 and alg._metrics["accepted"] == 1
 
@@ -287,11 +308,12 @@ def test_unknown_proposed_after_acceptance_is_not_counted_undecided():
     alg, (oracle, model, _) = _run(
         ["0", "1", "2", "3"],
         {"0": UNSAT, "1": SAT, "2": UNKNOWN, "3": UNKNOWN},
-        workers=4)
+        workers=4,
+    )
     assert model["tag"] == _tag("1")
-    assert alg._metrics["candidates"] == 2   # words 0 and 1 only
+    assert alg._metrics["candidates"] == 2  # words 0 and 1 only
     assert alg._metrics["accepted"] == 1
-    assert alg._undecided_candidates == 0    # words 2, 3 are past acceptance
+    assert alg._undecided_candidates == 0  # words 2, 3 are past acceptance
 
 
 # --------------------------------------------------------------------------- #
@@ -300,9 +322,8 @@ def test_unknown_proposed_after_acceptance_is_not_counted_undecided():
 def test_acceptance_in_a_later_batch_counts_every_prior_proposal():
     # Pool of 2: batch {0,1} both refuted, batch {2,3} accepts 3.
     alg, (oracle, model, _) = _run(
-        ["0", "1", "2", "3"],
-        {"0": UNSAT, "1": UNSAT, "2": UNSAT, "3": SAT},
-        workers=2)
+        ["0", "1", "2", "3"], {"0": UNSAT, "1": UNSAT, "2": UNSAT, "3": SAT}, workers=2
+    )
     assert model["tag"] == _tag("3")
     assert alg._metrics["candidates"] == 4
     assert alg._metrics["accepted"] == 1
@@ -310,16 +331,18 @@ def test_acceptance_in_a_later_batch_counts_every_prior_proposal():
 
 def test_a_fully_refuted_space_exhausts_as_unsat_across_batches():
     alg, (oracle, _, _) = _run(
-        ["0", "1", "2"], {"0": UNSAT, "1": UNSAT, "2": UNSAT},
-        workers=2, exhausted=UNSAT)
+        ["0", "1", "2"],
+        {"0": UNSAT, "1": UNSAT, "2": UNSAT},
+        workers=2,
+        exhausted=UNSAT,
+    )
     assert oracle is None
     assert alg._last_pivot_verdict == UNSAT
     assert alg._metrics["candidates"] == 3
 
 
 def test_a_scenario_give_up_is_unknown_not_unsat():
-    alg, (oracle, _, _) = _run(
-        ["0"], {"0": UNSAT}, workers=2, exhausted=UNKNOWN)
+    alg, (oracle, _, _) = _run(["0"], {"0": UNSAT}, workers=2, exhausted=UNKNOWN)
     assert oracle is None
     assert alg._last_pivot_verdict == UNKNOWN
 
@@ -340,11 +363,11 @@ def test_an_infeasible_word_is_filtered_before_it_is_dispatched(monkeypatch):
     monkeypatch.setattr(_box, "LinearWordFeasibilityFilter", _Filter)
     search = _PivotSearch(["0", "1", "2"], exhausted=UNSAT)
     search.model = object()  # enable the filter
-    alg = _ScriptedBox(search, {_tag("0"): UNSAT, _tag("1"): SAT,
-                                _tag("2"): UNSAT}, {})
+    alg = _ScriptedBox(search, {_tag("0"): UNSAT, _tag("1"): SAT, _tag("2"): UNSAT}, {})
     alg._printer = _SilentPrinter()
-    alg._config = _Config(common={"parallel-core": "4"},
-                          pivot_budget="30", pivot_timeout="45")
+    alg._config = _Config(
+        common={"parallel-core": "4"}, pivot_budget="30", pivot_timeout="45"
+    )
     alg._logger = None
     alg._tau_max = "8"
     alg._underlying = "dreal"
@@ -352,8 +375,7 @@ def test_an_infeasible_word_is_filtered_before_it_is_dispatched(monkeypatch):
     alg._feasibility_cache = {}
     alg._undecided_candidates = 0
     alg._metrics = _Counter()
-    oracle, _model, _ = alg._pivot_two_step(
-        _Encoding(), "LRA", 0, [], object())
+    oracle, _model, _ = alg._pivot_two_step(_Encoding(), "LRA", 0, [], object())
     # The infeasible word "1" reaches no candidate oracle...
     assert all(o.tag != _tag("1") for o in alg.ledger["built"])
     # ...and is blocked word-wide (a Not(And(...)) over its mode literals).
@@ -369,7 +391,8 @@ def test_an_infeasible_word_is_filtered_before_it_is_dispatched(monkeypatch):
 def test_accepted_oracle_from_the_pool_is_unbudgeted_and_unwalled():
     block = Eq(Real("x1_0_0"), RealVal("0"))
     alg, (oracle, model, _) = _run(
-        ["0", "1"], {"0": UNSAT, "1": SAT}, workers=4, blocks=[block])
+        ["0", "1"], {"0": UNSAT, "1": SAT}, workers=4, blocks=[block]
+    )
     assert model is not None
     # The pivot-binding block was asserted to the accepted candidate...
     assert any(f is block for f in oracle.asserted)
@@ -390,8 +413,8 @@ def test_acceptance_does_not_wait_on_a_later_long_running_candidate():
     long = 1.0
     started = time.monotonic()
     alg, (oracle, model, _) = _run(
-        ["0", "1"], {"0": SAT, "1": UNSAT},
-        delays={"1": long}, workers=4)
+        ["0", "1"], {"0": SAT, "1": UNSAT}, delays={"1": long}, workers=4
+    )
     elapsed = time.monotonic() - started
     assert model["tag"] == _tag("0")
     assert elapsed < long / 2, elapsed
@@ -444,8 +467,11 @@ def test_parallel_false_stays_serial_and_matches_the_reference():
     vmap = {_tag(w): v for w, v in verdicts.items()}
     off = _ScriptedBox(_PivotSearch(words), vmap, {})
     off._printer = _SilentPrinter()
-    off._config = _Config(common={"parallel": "false", "parallel-core": "25"},
-                          pivot_budget="30", pivot_timeout="45")
+    off._config = _Config(
+        common={"parallel": "false", "parallel-core": "25"},
+        pivot_budget="30",
+        pivot_timeout="45",
+    )
     off._logger = None
     off._tau_max = "8"
     off._underlying = "dreal"
@@ -467,6 +493,7 @@ def test_parallel_false_stays_serial_and_matches_the_reference():
 class _MultiSearchBox(RegionBoxDiscovery):
     """Serves a fresh scripted search per _pivot_two_step call, as run() does,
     so several searches can be driven against one shared verification pool."""
+
     def __init__(self, word_lists, verdicts, delays, ledger):
         super().__init__()
         self._queue = list(word_lists)
@@ -488,13 +515,15 @@ def test_a_run_scoped_pool_caps_concurrent_checks_across_searches():
     # concurrently active checks never exceeds the pool size.
     core = 2
     ledger = _new_ledger()
-    verdicts = {_tag("0"): SAT, _tag("1"): UNSAT}   # "0" accepts, "1" drains
+    verdicts = {_tag("0"): SAT, _tag("1"): UNSAT}  # "0" accepts, "1" drains
     delays = {_tag("1"): 0.2}
     alg = _MultiSearchBox([["0", "1"]] * 4, verdicts, delays, ledger)
     alg._printer = _SilentPrinter()
-    alg._config = _Config(common={"parallel": "true",
-                                  "parallel-core": str(core)},
-                          pivot_budget="30", pivot_timeout="45")
+    alg._config = _Config(
+        common={"parallel": "true", "parallel-core": str(core)},
+        pivot_budget="30",
+        pivot_timeout="45",
+    )
     alg._logger = None
     alg._tau_max = "8"
     alg._underlying = "dreal"
@@ -506,8 +535,7 @@ def test_a_run_scoped_pool_caps_concurrent_checks_across_searches():
     alg._verify_pool = pool
     try:
         for _ in range(4):
-            _o, model, _ = alg._pivot_two_step(
-                _Encoding(), "LRA", 0, [], object())
+            _o, model, _ = alg._pivot_two_step(_Encoding(), "LRA", 0, [], object())
             assert model["tag"] == _tag("0")
     finally:
         pool.shutdown(wait=True)
@@ -524,8 +552,11 @@ def test_shared_pool_and_local_pool_agree():
     vmap = {_tag(w): v for w, v in verdicts.items()}
     shared = _ScriptedBox(_PivotSearch(words), vmap, {})
     shared._printer = _SilentPrinter()
-    shared._config = _Config(common={"parallel": "true", "parallel-core": "4"},
-                             pivot_budget="30", pivot_timeout="45")
+    shared._config = _Config(
+        common={"parallel": "true", "parallel-core": "4"},
+        pivot_budget="30",
+        pivot_timeout="45",
+    )
     shared._logger = None
     shared._tau_max = "8"
     shared._underlying = "dreal"
@@ -536,15 +567,12 @@ def test_shared_pool_and_local_pool_agree():
     pool = ThreadPoolExecutor(max_workers=4)
     shared._verify_pool = pool
     try:
-        _o2, m_shared, _ = shared._pivot_two_step(
-            _Encoding(), "LRA", 0, [], object())
+        _o2, m_shared, _ = shared._pivot_two_step(_Encoding(), "LRA", 0, [], object())
     finally:
         pool.shutdown(wait=True)
     assert m_local["tag"] == m_shared["tag"] == _tag("2")
-    assert (local._metrics["candidates"]
-            == shared._metrics["candidates"] == 3)
-    assert (local._undecided_candidates
-            == shared._undecided_candidates == 1)
+    assert local._metrics["candidates"] == shared._metrics["candidates"] == 3
+    assert local._undecided_candidates == shared._undecided_candidates == 1
 
 
 # --------------------------------------------------------------------------- #
@@ -561,9 +589,11 @@ def test_a_candidate_queued_past_the_deadline_does_not_overrun_the_budget():
     verdicts = {_tag("0"): SAT, _tag("1"): SAT}  # would accept if they ran
     alg = _ScriptedBox(_PivotSearch(["0", "1"]), verdicts, {})
     alg._printer = _SilentPrinter()
-    alg._config = _Config(common={"parallel": "true",
-                                  "parallel-core": str(core)},
-                          pivot_budget=str(budget), pivot_timeout="45")
+    alg._config = _Config(
+        common={"parallel": "true", "parallel-core": str(core)},
+        pivot_budget=str(budget),
+        pivot_timeout="45",
+    )
     alg._logger = None
     alg._tau_max = "8"
     alg._underlying = "dreal"
@@ -576,8 +606,7 @@ def test_a_candidate_queued_past_the_deadline_does_not_overrun_the_budget():
     blockers = [pool.submit(time.sleep, blocker_secs) for _ in range(core)]
     try:
         start = time.monotonic()
-        oracle, _model, _ = alg._pivot_two_step(
-            _Encoding(), "LRA", 0, [], object())
+        oracle, _model, _ = alg._pivot_two_step(_Encoding(), "LRA", 0, [], object())
         elapsed = time.monotonic() - start
     finally:
         for b in blockers:
@@ -600,11 +629,12 @@ def test_pipeline_runs_later_candidates_while_a_slow_first_one_is_pending():
     # barrier would idle the pool until the slow one commits. The pipeline must
     # keep verifying later candidates meanwhile, so several finish before it.
     words = [str(i) for i in range(8)]
-    verdicts = {w: UNSAT for w in words}   # full exhaustion, no accept
+    verdicts = {w: UNSAT for w in words}  # full exhaustion, no accept
     alg, (oracle, _m, _) = _run(
-        words, verdicts, delays={"0": 0.3}, workers=4, exhausted=UNSAT)
-    assert oracle is None                  # space exhausted
-    checked = alg.ledger["checked"]        # completion order
+        words, verdicts, delays={"0": 0.3}, workers=4, exhausted=UNSAT
+    )
+    assert oracle is None  # space exhausted
+    checked = alg.ledger["checked"]  # completion order
     # Multiple checks ran at once, and the slow first-proposed one finished
     # only after several later ones -- the pool did not idle waiting on it.
     assert alg.ledger["max_active"] >= 2

@@ -12,6 +12,7 @@ variables are omitted. The projection is therefore weaker than the full model:
 an unsatisfiable result means the word admits no run, any other result is
 inconclusive.
 """
+
 from __future__ import annotations
 
 from fractions import Fraction
@@ -108,9 +109,13 @@ def _lin(expr, zmap: dict[str, z3.ArithRef]):
     raise _Unsupported
 
 
-_CMP = {Leq: lambda a, b: a <= b, Geq: lambda a, b: a >= b,
-        Lt: lambda a, b: a < b, Gt: lambda a, b: a > b,
-        Eq: lambda a, b: a == b}
+_CMP = {
+    Leq: lambda a, b: a <= b,
+    Geq: lambda a, b: a >= b,
+    Lt: lambda a, b: a < b,
+    Gt: lambda a, b: a > b,
+    Eq: lambda a, b: a == b,
+}
 
 
 def _atom(atom, zmap: dict[str, z3.ArithRef]):
@@ -135,9 +140,14 @@ def _same_atom(a, b) -> bool:
     """Whether ``a`` and ``b`` are ``Eq`` of variables with matching ids."""
     if isinstance(a, Eq) and isinstance(b, Eq):
         la, ra, lb, rb = a.left, a.right, b.left, b.right
-        return (isinstance(la, (Real, Int)) and isinstance(lb, (Real, Int))
-                and isinstance(ra, (Real, Int)) and isinstance(rb, (Real, Int))
-                and la.id == lb.id and ra.id == rb.id)
+        return (
+            isinstance(la, (Real, Int))
+            and isinstance(lb, (Real, Int))
+            and isinstance(ra, (Real, Int))
+            and isinstance(rb, (Real, Int))
+            and la.id == lb.id
+            and ra.id == rb.id
+        )
     return False
 
 
@@ -156,8 +166,13 @@ class LinearWordFeasibilityFilter:
     """Unsatisfiability test for a location word over the model's linear timeline,
     with a cache keyed by ``(bound, word)``."""
 
-    def __init__(self, model, time_bound, time_horizon=None,
-                 cache: dict[tuple[int, tuple[int, ...]], bool] | None = None):
+    def __init__(
+        self,
+        model,
+        time_bound,
+        time_horizon=None,
+        cache: dict[tuple[int, tuple[int, ...]], bool] | None = None,
+    ):
         self.model = model
         self.time_bound = float(time_bound)
         self.time_horizon = None if time_horizon is None else float(time_horizon)
@@ -174,7 +189,8 @@ class LinearWordFeasibilityFilter:
             except Exception:
                 pass
         self.cache: dict[tuple[int, tuple[int, ...]], bool] = (
-            cache if cache is not None else {})
+            cache if cache is not None else {}
+        )
 
     def word_is_infeasible(self, bound: int, word: Sequence[int]) -> bool:
         """True iff the word admits no run on the linear projection; False
@@ -212,8 +228,7 @@ class LinearWordFeasibilityFilter:
             common = ids if common is None else (common & ids)
         if not common:
             return {}
-        return {vid: [per_step[k][vid] for k in range(len(word))]
-                for vid in common}
+        return {vid: [per_step[k][vid] for k in range(len(word))] for vid in common}
 
     def _identity_reset(self, vid: str, mode: int, nxt: int) -> bool:
         """Whether the variable's value carries across the transition: a stay, or

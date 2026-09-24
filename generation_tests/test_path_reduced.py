@@ -13,6 +13,7 @@ word, excluding it structure-wide after verifying ONE word would drop the other
 untested. The loop must exclude only ``path_const AND word``, so a sibling word
 that shares the structure is still enumerated and can still be pooled.
 """
+
 import os
 
 from stlmc.constraints.constraints import Eq, Geq, Leq, Or, Real, RealVal
@@ -23,7 +24,8 @@ from stlmc.solver.z3 import z3Obj
 
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _FIXTURE_MODEL = os.path.join(
-    _REPO, "generation_tests", "fixtures", "path_branch.model")
+    _REPO, "generation_tests", "fixtures", "path_branch.model"
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -60,6 +62,7 @@ class _SilentPrinter:
 
 class _StubEncoder:
     """enumerate_components_at is ignored by the scripted search; reset is a no-op."""
+
     model = None
 
     def enumerate_components_at(self, depth):
@@ -86,10 +89,12 @@ class _SharedPathSearch:
     z3, so structure-wide vs word-aware exclusion behave exactly as they would on
     a real scenario solver.
     """
+
     def __init__(self, words):
         self._words = list(words)
         self.P = Eq(_AUX, RealVal("1"))
         import z3
+
         self._solver = z3.Solver()
         self._solver.add(z3Obj(self.P))
         self._solver.add(z3Obj(Geq(_CM0, RealVal("0"))))
@@ -99,6 +104,7 @@ class _SharedPathSearch:
 
     def _feasible(self, w):
         import z3
+
         self._solver.push()
         self._solver.add(z3Obj(Eq(_CM0, RealVal(w))))
         r = self._solver.check()
@@ -124,6 +130,7 @@ class _SharedPathSearch:
 
 class _NoneSearch:
     """Immediately exhausted with a chosen verdict (UNSAT spent / UNKNOWN gave up)."""
+
     def __init__(self, verdict):
         self._v = verdict
 
@@ -140,6 +147,7 @@ class _NoneSearch:
 class _ForeverUnsatSearch:
     """Always proposes the same word; every verification will refute it. Models a
     depth whose skeleton space never runs dry within a budget."""
+
     def __init__(self, word="0"):
         self.P = Eq(_AUX, RealVal("1"))
         self._word = word
@@ -165,6 +173,7 @@ class _Verifier:
     ``verdicts`` maps a word string to SAT/UNSAT/UNKNOWN. ``witness_drop`` names a
     word whose SAT witness omits the mode variable (to exercise the schema guard).
     """
+
     def __init__(self, verdicts, witness_drop=None):
         self._verdicts = verdicts
         self._drop = witness_drop
@@ -178,6 +187,7 @@ class _Verifier:
 
     def assert_(self, formula):
         import re
+
         pins = re.findall(r"currentMode_(\d+) = ([0-9.]+)", str(formula))
         if pins:
             self._word = ".".join(v for _, v in sorted(pins, key=lambda p: int(p[0])))
@@ -200,6 +210,7 @@ class _Verifier:
 def _make_verifier(verdicts, witness_drop=None):
     def factory(**kwargs):
         return _Verifier(verdicts, witness_drop)
+
     return factory
 
 
@@ -208,20 +219,24 @@ def _make_verifier(verdicts, witness_drop=None):
 # --------------------------------------------------------------------------- #
 def _pooled_words(pool):
     import re
+
     out = []
     for p in pool:
         steps = sorted(
             (int(re.match(r"currentMode_(\d+)", v.id).group(1)), c.value)
-            for v, c in p.items() if re.match(r"currentMode_(\d+)$", v.id))
+            for v, c in p.items()
+            if re.match(r"currentMode_(\d+)$", v.id)
+        )
         out.append(".".join(c for _, c in steps))
     return out
 
 
-def _run(search, verdicts, monkeypatch, *, radius=0, per_depth=64,
-         witness_drop=None, **gen):
+def _run(
+    search, verdicts, monkeypatch, *, radius=0, per_depth=64, witness_drop=None, **gen
+):
     import stlmc.generation.pathenum as pathenum
-    monkeypatch.setattr(pathenum, "make_oracle",
-                        _make_verifier(verdicts, witness_drop))
+
+    monkeypatch.setattr(pathenum, "make_oracle", _make_verifier(verdicts, witness_drop))
 
     class _Alg(DiscretePathEnum):
         def _make_reduced_search(self, components, model, seed, timeout_ms):
@@ -229,9 +244,18 @@ def _run(search, verdicts, monkeypatch, *, radius=0, per_depth=64,
 
     alg = _Alg()
     result, _t, first_depth, pool = alg._run_reduced(
-        _StubEncoder(), target_depths=[0], per_depth=per_depth, radius=radius,
-        seed=0, logic="QF_LRA", config=_GenConfig(**gen), logger=None,
-        printer=_SilentPrinter(), max_depth=0, tau_max=1.0)
+        _StubEncoder(),
+        target_depths=[0],
+        per_depth=per_depth,
+        radius=radius,
+        seed=0,
+        logic="QF_LRA",
+        config=_GenConfig(**gen),
+        logger=None,
+        printer=_SilentPrinter(),
+        max_depth=0,
+        tau_max=1.0,
+    )
     return result, first_depth, pool
 
 
@@ -305,7 +329,8 @@ def test_the_pivot_budget_stops_a_runaway_depth_as_unresolved(monkeypatch):
     hitting it leaves the depth unresolved (Unknown) rather than looping until an
     external timeout kills the process."""
     result, _fd, pool = _run(
-        _ForeverUnsatSearch("0"), {"0": UNSAT}, monkeypatch, pivot_budget="0")
+        _ForeverUnsatSearch("0"), {"0": UNSAT}, monkeypatch, pivot_budget="0"
+    )
     assert pool == []
     assert result == "Unknown"
 
@@ -316,6 +341,7 @@ def test_the_verify_budget_is_clamped_to_the_depth_budget(monkeypatch):
     so a call that starts just under the budget cannot run a full query-timeout
     past it. The per-call budget never exceeds the pivot-budget."""
     import stlmc.generation.pathenum as pathenum
+
     made = []
 
     def factory(**kwargs):
@@ -330,10 +356,18 @@ def test_the_verify_budget_is_clamped_to_the_depth_budget(monkeypatch):
             return _ForeverUnsatSearch("0")
 
     _Alg()._run_reduced(
-        _StubEncoder(), target_depths=[0], per_depth=64, radius=0, seed=0,
+        _StubEncoder(),
+        target_depths=[0],
+        per_depth=64,
+        radius=0,
+        seed=0,
         logic="QF_LRA",
         config=_GenConfig(pivot_budget="0.2", query_timeout="45"),
-        logger=None, printer=_SilentPrinter(), max_depth=0, tau_max=1.0)
+        logger=None,
+        printer=_SilentPrinter(),
+        max_depth=0,
+        tau_max=1.0,
+    )
     budgets = [b for v in made for b in v.budgets]
     assert budgets, "expected at least one clamped verification call"
     assert all(b <= 0.2 for b in budgets), budgets
@@ -348,7 +382,8 @@ def test_a_witness_missing_the_word_is_not_pooled(monkeypatch):
     unresolved rather than claiming exhaustion around a dropped witness."""
     search = _SharedPathSearch(["0", "1"])
     result, _fd, pool = _run(
-        search, {"0": SAT, "1": UNSAT}, monkeypatch, witness_drop="0")
+        search, {"0": SAT, "1": UNSAT}, monkeypatch, witness_drop="0"
+    )
     assert pool == []
     assert result == "Unknown"
 

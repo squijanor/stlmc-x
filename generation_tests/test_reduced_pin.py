@@ -19,6 +19,7 @@ The real-encoding numbers (the reduced query carries fewer forall_t than
 encoding.consts on the actual benchmarks) are confirmed by the delta runs on the
 mac, not by a check here -- these tests need neither dReal nor a model.
 """
+
 from stlmc.constraints.constraints import Bool, BoolVal, Eq, Real, RealVal
 from stlmc.generation import encode as _encode  # noqa: F401  resolve import order
 from stlmc.generation.box import RegionBoxDiscovery
@@ -32,7 +33,10 @@ from stlmc.generation.reduced import ReducedPivotSearch
 # --------------------------------------------------------------------------- #
 def _components(bound=2):
     return StlComponents(
-        bound=bound, tau_max=1.0, delta=0.1, sub_formulas=set(),
+        bound=bound,
+        tau_max=1.0,
+        delta=0.1,
+        sub_formulas=set(),
         initial_stl_f=Bool("INIT_STL"),
         initial_model_f=Bool("INIT_MODEL"),
         initial_track_const=Bool("INIT_TRACK"),
@@ -68,10 +72,21 @@ def test_minimize_target_unrolls_the_recursion():
     (FINAL model consts + time order at the pivot bound) -- the two
     current_minimize_info shapes (enumerate.py:199 and :341), flattened."""
     s = str(_reduced(bound=2)._not_F)
-    for marker in ("INIT_MODEL", "INIT_STL", "INIT_TRACK",
-                   "MODELNEXT_0", "STL_0", "STLTIME_0",
-                   "MODELNEXT_1", "STL_1", "STLTIME_1",
-                   "MODELFINAL", "STL_2", "STLTIME_2", "TIMEORDER"):
+    for marker in (
+        "INIT_MODEL",
+        "INIT_STL",
+        "INIT_TRACK",
+        "MODELNEXT_0",
+        "STL_0",
+        "STLTIME_0",
+        "MODELNEXT_1",
+        "STL_1",
+        "STLTIME_1",
+        "MODELFINAL",
+        "STL_2",
+        "STLTIME_2",
+        "TIMEORDER",
+    ):
         assert marker in s, marker
 
 
@@ -136,6 +151,7 @@ class _Section:
 
 class _GenConfig:
     """Just the [gen] section; budgets are given, not read from a benchmark."""
+
     def __init__(self, **gen):
         self._gen = _Section({k.replace("_", "-"): v for k, v in gen.items()})
 
@@ -166,6 +182,7 @@ class _ScriptedReducedSearch:
     ``None`` once spent (``forever`` repeats the last). ``last_verdict`` is what
     the exhausted search reports -- UNSAT (structure space spent) vs UNKNOWN (the
     scenario solver gave up), the distinction the caller must preserve."""
+
     def __init__(self, words, forever=False, exhausted_verdict=UNSAT):
         self._words = list(words)
         self._forever = forever
@@ -182,8 +199,7 @@ class _ScriptedReducedSearch:
         if not self._words:
             return None
         word = self._words[0] if self._forever else self._words.pop(0)
-        assn = {Real(f"currentMode_{k}"): RealVal(str(d))
-                for k, d in enumerate(word)}
+        assn = {Real(f"currentMode_{k}"): RealVal(str(d)) for k, d in enumerate(word)}
         return BoolVal("True"), BoolVal("True"), assn
 
 
@@ -220,11 +236,12 @@ class _ScriptedCandidate:
 
 class _ScriptedReducedTwoStep(RegionBoxDiscovery):
     """kappa_box with the reduced pivot search and candidate oracle given."""
-    def __init__(self, words, verdicts, forever=False,
-                 exhausted_verdict=UNSAT):
+
+    def __init__(self, words, verdicts, forever=False, exhausted_verdict=UNSAT):
         super().__init__()
         self.search = _ScriptedReducedSearch(
-            words, forever=forever, exhausted_verdict=exhausted_verdict)
+            words, forever=forever, exhausted_verdict=exhausted_verdict
+        )
         self._verdicts = list(verdicts)
         self.candidates = []
 
@@ -238,11 +255,12 @@ class _ScriptedReducedTwoStep(RegionBoxDiscovery):
         return oracle
 
 
-def _run(words, verdicts, blocks=(), forever=False,
-         exhausted_verdict=UNSAT, **gen):
+def _run(words, verdicts, blocks=(), forever=False, exhausted_verdict=UNSAT, **gen):
     from stlmc.generation.box import _Counter
+
     alg = _ScriptedReducedTwoStep(
-        words, verdicts, forever=forever, exhausted_verdict=exhausted_verdict)
+        words, verdicts, forever=forever, exhausted_verdict=exhausted_verdict
+    )
     alg._printer = _SilentPrinter()
     alg._config = _GenConfig(**gen)
     alg._logger = None
@@ -258,15 +276,14 @@ class TestReducedVerdictRecording:
     """UNSAT (structure space spent) must stay distinct from UNKNOWN (the
     scenario solver gave up), so a resource failure is never reported as
     absence."""
+
     def test_a_spent_structure_space_records_unsat(self):
-        alg, (oracle, _, _) = _run([], [], pivot_budget=30,
-                                   exhausted_verdict=UNSAT)
+        alg, (oracle, _, _) = _run([], [], pivot_budget=30, exhausted_verdict=UNSAT)
         assert oracle is None
         assert alg._last_pivot_verdict == UNSAT
 
     def test_a_search_give_up_records_unknown_not_unsat(self):
-        alg, (oracle, _, _) = _run([], [], pivot_budget=30,
-                                   exhausted_verdict=UNKNOWN)
+        alg, (oracle, _, _) = _run([], [], pivot_budget=30, exhausted_verdict=UNKNOWN)
         assert oracle is None
         assert alg._last_pivot_verdict == UNKNOWN
 
@@ -279,38 +296,38 @@ class TestReducedCandidateLoop:
 
     def test_a_refuted_candidate_advances_the_search(self):
         # two refutations then accept: three candidates, one accepted.
-        alg, (oracle, _, _) = _run(["012", "013", "014"],
-                                   [UNSAT, UNSAT, SAT], pivot_budget=30)
+        alg, (oracle, _, _) = _run(
+            ["012", "013", "014"], [UNSAT, UNSAT, SAT], pivot_budget=30
+        )
         assert oracle is not None
         assert alg._metrics["candidates"] == 3 and alg._metrics["accepted"] == 1
 
     def test_the_candidate_budget_is_clamped_to_the_deadline(self):
         """One candidate must not overrun the search deadline by a whole
         pivot-timeout: the per-candidate budget never exceeds the time left."""
-        alg, _ = _run(["01"], [UNSAT] * 100, forever=True,
-                      pivot_budget=0.2, pivot_timeout=45)
-        numeric = [b for c in alg.candidates for b in c.budgets
-                   if isinstance(b, float)]
+        alg, _ = _run(
+            ["01"], [UNSAT] * 100, forever=True, pivot_budget=0.2, pivot_timeout=45
+        )
+        numeric = [b for c in alg.candidates for b in c.budgets if isinstance(b, float)]
         assert numeric and all(b <= 0.2 for b in numeric), numeric
 
 
 class TestReducedBlocksBindTheCandidate:
     """The blocks bind the pivot query (the candidate oracle chooses the pivot),
     in a pushed frame so growth on the same oracle is not walled."""
+
     def _block(self):
         return Eq(Real("x1_0_0"), RealVal("0"))
 
     def test_the_candidate_oracle_sees_the_blocks(self):
         block = self._block()
-        alg, (oracle, model, _) = _run(["01"], [SAT], blocks=[block],
-                                       pivot_budget=30)
+        alg, (oracle, model, _) = _run(["01"], [SAT], blocks=[block], pivot_budget=30)
         assert model is not None
         assert any(f is block for f in oracle.asserted)
 
     def test_growth_is_not_walled_by_the_blocks(self):
         block = self._block()
-        alg, (oracle, _, _) = _run(["01"], [SAT], blocks=[block],
-                                   pivot_budget=30)
+        alg, (oracle, _, _) = _run(["01"], [SAT], blocks=[block], pivot_budget=30)
         assert not any(f is block for f in oracle.live)
 
     def test_the_search_is_told_the_blocks_too(self):
@@ -322,6 +339,7 @@ class TestReducedBlocksBindTheCandidate:
 class TestReducedBackendRouting:
     def test_dreal_routes_through_the_reduced_two_step(self):
         from stlmc.generation.box import _Counter
+
         alg = _ScriptedReducedTwoStep(["01"], [SAT])
         alg._printer = _SilentPrinter()
         alg._config = _GenConfig(pivot_budget="30")

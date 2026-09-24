@@ -33,3 +33,4 @@ venv/
 
 # log
 log/
+/.local/

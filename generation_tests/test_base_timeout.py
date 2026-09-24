@@ -9,6 +9,7 @@ benchmark file. The serial and parallel timeouts run against a stub subprocess
 that sleeps, and the propagation is checked on the runner flag that
 ``EnumerateAlgorithm.run`` turns into ``Unknown``.
 """
+
 import os
 import subprocess
 import threading
@@ -141,16 +142,25 @@ def test_config_with_solver_timeout_is_accepted(tmp_path):
     cfg_file = tmp_path / "m.cfg"
     cfg_file.write_text(
         'common {\n bound = 2\n time-bound = 2\n solver = "dreal"\n'
-        ' solver-timeout = 30\n}\n'
-        'dreal {\n ode-order = 5\n ode-step = 0.001\n}\n')
+        " solver-timeout = 30\n}\n"
+        "dreal {\n ode-order = 5\n ode-step = 0.001\n}\n"
+    )
     cfg = cv.parse_from_file(str(cfg_file), base)
     assert cfg.get_section("common").get_value("solver-timeout") == "30"
 
 
-@pytest.mark.parametrize("raw, expected", [
-    (None, None), ("", None), ("off", None), ("none", None), ("0", None),
-    ("30", 30.0), ("12.5", 12.5),
-])
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        (None, None),
+        ("", None),
+        ("off", None),
+        ("none", None),
+        ("0", None),
+        ("30", 30.0),
+        ("12.5", 12.5),
+    ],
+)
 def test_resolve_solver_timeout_values(raw, expected):
     values = {} if raw is None else {"solver-timeout": raw}
     assert resolve_solver_timeout(_Cfg({"common": _Sec(values)})) == expected
@@ -168,14 +178,15 @@ def test_resolve_solver_timeout_rejects_bad(raw):
 def test_serial_dreal_query_timeout_returns_unknown(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     solver = dRealSolver()
-    solver.config = _Cfg({
-        "dreal": _Sec({"executable-path": _hang_script(tmp_path)}),
-        "common": _Sec({"time-horizon": "2", "time-bound": "2"}),
-    })
+    solver.config = _Cfg(
+        {
+            "dreal": _Sec({"executable-path": _hang_script(tmp_path)}),
+            "common": _Sec({"time-horizon": "2", "time-bound": "2"}),
+        }
+    )
     solver.append_logger(Logger())
     # skip declare-building; the point under test is the budget and the kill
-    monkeypatch.setattr(solver, "get_declared_variables",
-                        lambda const, th, tb: ([], 0))
+    monkeypatch.setattr(solver, "get_declared_variables", lambda const, th, tb: ([], 0))
     solver.set_query_budget(0.5)
 
     started = time.monotonic()

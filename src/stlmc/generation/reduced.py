@@ -91,8 +91,14 @@ class ReducedPivotSearch:
     ODE integrals and invariants from it.
     """
 
-    def __init__(self, components, model, *, seed: int | None = None,
-                 timeout_ms: int | None = None) -> None:
+    def __init__(
+        self,
+        components,
+        model,
+        *,
+        seed: int | None = None,
+        timeout_ms: int | None = None,
+    ) -> None:
         self.model = model
         self.tau_max = components.tau_max
         self.sub_formulas = components.sub_formulas
@@ -102,18 +108,33 @@ class ReducedPivotSearch:
         N = int(components.bound)
         self.N = N
 
-        init_conj = And([components.initial_model_f,
-                         components.initial_stl_f,
-                         components.initial_track_const])
+        init_conj = And(
+            [
+                components.initial_model_f,
+                components.initial_stl_f,
+                components.initial_track_const,
+            ]
+        )
         # next-form structural path per earlier bound (no time order, no final).
-        nexts = [And([components.model_consts[b],
-                      components.stl_consts[b],
-                      components.stl_time_consts[b]]) for b in range(N)]
+        nexts = [
+            And(
+                [
+                    components.model_consts[b],
+                    components.stl_consts[b],
+                    components.stl_time_consts[b],
+                ]
+            )
+            for b in range(N)
+        ]
         # final-form structural path at the pivot bound (final model + time order).
-        n_path_N = And([components.model_f_k_final,
-                        components.stl_consts[N],
-                        components.stl_time_consts[N],
-                        components.time_order_const])
+        n_path_N = And(
+            [
+                components.model_f_k_final,
+                components.stl_consts[N],
+                components.stl_time_consts[N],
+                components.time_order_const,
+            ]
+        )
         self.stl_final = components.final_f_k
 
         # The COMPLETE model execution: the initial condition, every non-final
@@ -131,7 +152,8 @@ class ReducedPivotSearch:
         self._model_execution = And(
             [components.initial_model_f]
             + [components.model_consts[b] for b in range(N)]
-            + [components.model_f_k_final])
+            + [components.model_f_k_final]
+        )
 
         # Flattened recursive falsification target F (see module docstring).
         self._not_F = Not(And([init_conj] + nexts + [n_path_N]))
@@ -288,7 +310,8 @@ class ReducedPivotSearch:
             # pooling a witness for an unforced target.
             raise RuntimeError(
                 "reduced-query minimizer: the candidate did not force the "
-                "falsification target (Not(F) is satisfiable under it)")
+                "falsification target (Not(F) is satisfiable under it)"
+            )
         cores = {str(x) for x in s.unsat_core()}
         p_reals = cores.difference(true_bool_ids)
         p_bools = cores.difference(p_reals)
@@ -301,26 +324,30 @@ class ReducedPivotSearch:
 
         # Reduced property path: only the core-selected forall_t. (enumerate.py:295-298)
         extra_prop_path, extra_time_path = assn2path(
-            p_bools, self.sub_formulas, self.tau_max)
+            p_bools, self.sub_formulas, self.tau_max
+        )
         extra_prop_path_const = path2const(extra_prop_path, self.model)
         extra_time_path_const = time_path2const(extra_time_path)
         # Range consts, so the reduced query does not drop them with the core.
         range_const = And(
-            [self.model.make_range_consts(d)[0] for d in range(0, self.N + 1)])
+            [self.model.make_range_consts(d)[0] for d in range(0, self.N + 1)]
+        )
 
         # The reduced query drops only NON-core property subformulas. The full
         # model execution is retained in whole (self._model_execution) so the
         # witness is a genuine automaton run -- init, flow, invariants, guards
         # and resets are all present -- rather than a trajectory that merely
         # satisfies the surviving property path.
-        total_const = And([
-            path_const,
-            extra_prop_path_const,
-            self.stl_final,
-            extra_time_path_const,
-            range_const,
-            self._model_execution,
-        ])
+        total_const = And(
+            [
+                path_const,
+                extra_prop_path_const,
+                self.stl_final,
+                extra_time_path_const,
+                range_const,
+                self._model_execution,
+            ]
+        )
         # Resolve the ODE-integral and invariant Booleans by substituting their
         # definitions across the whole query, so an inactive branch's relations
         # stay inside their false branch instead of becoming global obligations.

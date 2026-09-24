@@ -32,8 +32,9 @@ def word_assignment(word):
 def admitted(clause, length):
     """Every word of ``length`` the clause still admits, by enumeration in z3."""
     modes = [Int(f"currentMode_{k}") for k in range(length)]
-    domain = And([And([Geq(v, IntVal("0")), Leq(v, IntVal(str(MODES - 1)))])
-                  for v in modes])
+    domain = And(
+        [And([Geq(v, IntVal("0")), Leq(v, IntVal(str(MODES - 1)))]) for v in modes]
+    )
     solver = z3.Solver()
     solver.add(z3Obj(domain))
     solver.add(z3Obj(clause))
@@ -71,8 +72,11 @@ class TestBlockSemantics:
         word = (0, 1, 2)
         for radius in (1, 2):
             block = block_radius(word_assignment(word), radius, uid=radius)
-            expected = {w for w in itertools.product(range(MODES), repeat=len(word))
-                        if hamming(w, word) > radius}
+            expected = {
+                w
+                for w in itertools.product(range(MODES), repeat=len(word))
+                if hamming(w, word) > radius
+            }
             assert admitted(block.clause, len(word)) == expected, radius
 
     def test_a_negative_radius_is_radius_zero(self):
@@ -92,7 +96,7 @@ class TestRadiusCap:
     """
 
     def test_radius_is_capped_at_the_word_length(self):
-        word = (0, 1)                      # depth 1: two positions
+        word = (0, 1)  # depth 1: two positions
         block = block_radius(word_assignment(word), 5, uid=0)
         assert block.radius == len(word) - 1
 
@@ -110,16 +114,17 @@ class TestRadiusCap:
         block = block_radius(word_assignment(word), 99, uid=0)
         assert block.radius == 2
         assert admitted(block.clause, 3) == {
-            w for w in itertools.product(range(MODES), repeat=3)
-            if hamming(w, word) == 3}
+            w
+            for w in itertools.product(range(MODES), repeat=3)
+            if hamming(w, word) == 3
+        }
 
     def test_an_uncapped_radius_would_have_blocked_everything(self):
         """The failure the cap prevents, stated directly: `sum >= r+1` over L
         0/1 indicators is unsatisfiable once r reaches L."""
         length = 2
         indicators = [Int(f"hb$0${k}") for k in range(length)]
-        bounded = [And([Geq(i, IntVal("0")), Leq(i, IntVal("1"))])
-                   for i in indicators]
+        bounded = [And([Geq(i, IntVal("0")), Leq(i, IntVal("1"))]) for i in indicators]
         total = reduce(Add, indicators)
         solver = z3.Solver()
         solver.add(z3Obj(And(bounded + [Geq(total, IntVal(str(length + 1)))])))
@@ -219,8 +224,10 @@ class TestWordIntegrity:
         ones, which z3 keeps distinct from same-named Reals)."""
         from stlmc.constraints.constraints import Real, RealVal
 
-        assignment = {Real("currentMode_0"): RealVal("1.000000"),
-                      Real("currentMode_1"): RealVal("2.000000")}
+        assignment = {
+            Real("currentMode_0"): RealVal("1.000000"),
+            Real("currentMode_1"): RealVal("2.000000"),
+        }
         for radius in (0, 1):
             block = block_radius(assignment, radius, uid=radius)
             solver = z3.Solver()
@@ -233,16 +240,21 @@ class TestWordIntegrity:
                 if solver.check() == z3.sat:
                     still.add(candidate)
                 solver.pop()
-            expected = {w for w in itertools.product(range(MODES), repeat=2)
-                        if hamming(w, (1, 2)) > radius}
+            expected = {
+                w
+                for w in itertools.product(range(MODES), repeat=2)
+                if hamming(w, (1, 2)) > radius
+            }
             assert still == expected, radius
 
     def test_off_lattice_positions_are_detected(self):
         from stlmc.constraints.constraints import Real, RealVal
         from stlmc.generation.pathenum import _location_word, _off_lattice
 
-        assignment = {Real("currentMode_0"): RealVal("1.500000"),
-                      Real("currentMode_1"): RealVal("2.000000")}
+        assignment = {
+            Real("currentMode_0"): RealVal("1.500000"),
+            Real("currentMode_1"): RealVal("2.000000"),
+        }
         bad = _off_lattice(_location_word(assignment))
         assert bad == ["currentMode_0=1.500000"]
 
@@ -250,8 +262,10 @@ class TestWordIntegrity:
         from stlmc.constraints.constraints import Real, RealVal
         from stlmc.generation.pathenum import _location_word, _off_lattice
 
-        assignment = {Real("currentMode_0"): RealVal("1.000000"),
-                      Real("currentMode_1"): RealVal("2")}
+        assignment = {
+            Real("currentMode_0"): RealVal("1.000000"),
+            Real("currentMode_1"): RealVal("2"),
+        }
         assert _off_lattice(_location_word(assignment)) == []
 
 
@@ -272,15 +286,19 @@ class TestArityGuard:
     def test_a_full_arity_word_is_not_flagged(self):
         from stlmc.generation.pathenum import _location_word, _missing_modes
 
-        word = _location_word({Int("currentMode_0"): IntVal("0"),
-                               Int("currentMode_1"): IntVal("2")})
+        word = _location_word(
+            {Int("currentMode_0"): IntVal("0"), Int("currentMode_1"): IntVal("2")}
+        )
         assert _missing_modes(word, depth=1) == []
 
     def test_every_position_missing_is_reported_in_step_order(self):
         from stlmc.generation.pathenum import _missing_modes
 
         assert _missing_modes([], depth=2) == [
-            "currentMode_0", "currentMode_1", "currentMode_2"]
+            "currentMode_0",
+            "currentMode_1",
+            "currentMode_2",
+        ]
 
     def test_a_short_model_drives_run_to_unresolved(self, monkeypatch):
         """The whole guard, at run() level: a SAT model short of its arity is
@@ -336,9 +354,13 @@ class TestArityGuard:
         cfg = Configuration()
         common = Section()
         common.name = "common"
-        common.arguments = {"bound": "1", "time-bound": "8",
-                            "threshold": "0.1", "solver": "z3",
-                            "gen-seed": "0"}
+        common.arguments = {
+            "bound": "1",
+            "time-bound": "8",
+            "threshold": "0.1",
+            "solver": "z3",
+            "gen-seed": "0",
+        }
         cfg.add_section(common)
         gen = Section()
         gen.name = "gen"
@@ -347,7 +369,8 @@ class TestArityGuard:
 
         printer = _Printer()
         result, _elapsed, _bound, pool = pathenum.DiscretePathEnum().run(
-            None, None, None, cfg, None, None, printer)
+            None, None, None, cfg, None, None, printer
+        )
 
         assert pool == [], "a short-arity model must not be pooled"
         assert result == "Unknown"

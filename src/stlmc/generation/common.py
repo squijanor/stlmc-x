@@ -132,8 +132,7 @@ def _check_int(key: str, raw: str) -> None:
     try:
         int(raw)
     except ValueError:
-        raise ValueError(
-            f'[gen] {key} = "{raw}": an integer is required') from None
+        raise ValueError(f'[gen] {key} = "{raw}": an integer is required') from None
 
 
 def _check_depths(key: str, raw: str) -> None:
@@ -158,11 +157,13 @@ def _check_query_timeout(key: str, raw: str) -> None:
     except ValueError:
         raise ValueError(
             f'[gen] {key} = "{raw}": a number of seconds is required '
-            '(0, "off" or "none" disables the per-call bound)') from None
+            '(0, "off" or "none" disables the per-call bound)'
+        ) from None
     if sec != sec or sec in (float("inf"), float("-inf")) or sec < 0:
         raise ValueError(
             f'[gen] {key} = "{raw}": a finite number of seconds >= 0 is '
-            'required (0, "off" or "none" disables the per-call bound)')
+            'required (0, "off" or "none" disables the per-call bound)'
+        )
 
 
 def _check_flag01(key: str, raw: str) -> None:
@@ -174,22 +175,21 @@ def _check_frac(key: str, raw: str) -> Fraction:
     try:
         return Fraction(str(raw).strip().strip('"'))
     except (ValueError, ZeroDivisionError):
-        raise ValueError(
-            f'[gen] {key} = "{raw}": a number is required') from None
+        raise ValueError(f'[gen] {key} = "{raw}": a number is required') from None
 
 
 def _check_positive_theta(key: str, raw: str) -> None:
     if _check_frac(key, raw) <= 0:
         raise ValueError(
             f'[gen] {key} = "{raw}": must be > 0 -- theta is the growth '
-            'granularity, and at 0 the exact face search never terminates')
+            "granularity, and at 0 the exact face search never terminates"
+        )
 
 
 def _check_unit_frac(key: str, raw: str) -> None:
     value = _check_frac(key, raw)
     if not (0 <= value < 1):
-        raise ValueError(
-            f'[gen] {key} = "{raw}": must be in [0, 1) (0 = off)')
+        raise ValueError(f'[gen] {key} = "{raw}": must be in [0, 1) (0 = off)')
 
 
 def _check_nonneg_frac(key: str, raw: str) -> None:
@@ -201,8 +201,8 @@ def _check_int_at_least(floor: int, note: str = ""):
     def check(key: str, raw: str) -> None:
         _check_int(key, raw)
         if int(raw) < floor:
-            raise ValueError(
-                f'[gen] {key} = "{raw}": must be >= {floor}{note}')
+            raise ValueError(f'[gen] {key} = "{raw}": must be >= {floor}{note}')
+
     return check
 
 
@@ -211,54 +211,64 @@ def _check_positive_seconds(key: str, raw: str) -> None:
         value = float(raw)
     except ValueError:
         raise ValueError(
-            f'[gen] {key} = "{raw}": a number of seconds is required') from None
+            f'[gen] {key} = "{raw}": a number of seconds is required'
+        ) from None
     if not value > 0 or value != value or value == float("inf"):
         raise ValueError(
             f'[gen] {key} = "{raw}": must be a finite number of seconds > 0 '
             '-- these are the search budgets, and neither has an "off" '
-            'spelling')
+            "spelling"
+        )
 
 
 _NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _check_target_axes(key: str, raw: str) -> None:
-    toks = [t.strip() for t in re.split(r"[,/]", str(raw).strip().strip('"'))
-            if t.strip()]
+    toks = [
+        t.strip() for t in re.split(r"[,/]", str(raw).strip().strip('"')) if t.strip()
+    ]
     if not toks:
         raise ValueError(
             f'[gen] {key} = "{raw}": at least one axis name is required; the '
-            'list is slash-separated, e.g. "y/psi/r/Vc"')
+            'list is slash-separated, e.g. "y/psi/r/Vc"'
+        )
     for tok in toks:
         if not _NAME_RE.match(tok):
             raise ValueError(
-                f'[gen] {key} = "{raw}": "{tok}" is not a state-variable name')
+                f'[gen] {key} = "{raw}": "{tok}" is not a state-variable name'
+            )
 
 
 def _check_target_bounds(key: str, raw: str) -> None:
-    toks = [t.strip() for t in re.split(r"[,/]", str(raw).strip().strip('"'))
-            if t.strip()]
+    toks = [
+        t.strip() for t in re.split(r"[,/]", str(raw).strip().strip('"')) if t.strip()
+    ]
     if not toks:
         return
     if len(toks) % 3 != 0:
         raise ValueError(
             f'[gen] {key} = "{raw}": expected name/lo/hi triples (a multiple of '
-            'three slash-separated tokens), e.g. "y/0.5/2.5/psi/0.1/0.7"')
+            'three slash-separated tokens), e.g. "y/0.5/2.5/psi/0.1/0.7"'
+        )
     for i in range(0, len(toks), 3):
         name, lo_raw, hi_raw = toks[i], toks[i + 1], toks[i + 2]
         if not _NAME_RE.match(name):
             raise ValueError(
-                f'[gen] {key} = "{raw}": "{name}" is not a state-variable name')
+                f'[gen] {key} = "{raw}": "{name}" is not a state-variable name'
+            )
         try:
             lo, hi = Fraction(lo_raw), Fraction(hi_raw)
         except (ValueError, ZeroDivisionError):
             raise ValueError(
                 f'[gen] {key} = "{raw}": {name} edges "{lo_raw}/{hi_raw}" must '
-                'both be numbers') from None
+                "both be numbers"
+            ) from None
         if lo > hi:
             raise ValueError(
                 f'[gen] {key} = "{raw}": {name} lower edge {lo_raw} exceeds '
-                f'upper edge {hi_raw}')
+                f"upper edge {hi_raw}"
+            )
 
 
 # Key -> check. Entries cover the keys kappa_path reads and the keys the
@@ -279,10 +289,12 @@ _GEN_KEY_CHECKS = {
     "epsilon-relative": _check_unit_frac,
     "thin-ic": _check_nonneg_frac,
     "bisect-iters": _check_int_at_least(0, " (0 = face precision theta)"),
-    "k-witness": _check_int_at_least(1, " (the per-axis cell budget of the "
-                                        "lattice harvest, Def. 7: k >= 1)"),
-    "k-ic": _check_int_at_least(0, " (0 = no budget, explore each depth to "
-                                   "exhaustion)"),
+    "k-witness": _check_int_at_least(
+        1, " (the per-axis cell budget of the lattice harvest, Def. 7: k >= 1)"
+    ),
+    "k-ic": _check_int_at_least(
+        0, " (0 = no budget, explore each depth to exhaustion)"
+    ),
     "word-rotate": _check_int_at_least(0, " (0 = off)"),
     "log-every": _check_int_at_least(1),
     "pivot-budget": _check_positive_seconds,
@@ -336,7 +348,7 @@ def z3_logic(config) -> str:
             except KeyError:
                 raise ValueError(
                     f'[z3] logic = "{raw}": unrecognised value; expected one '
-                    f'of {", ".join(sorted(_Z3_LOGIC))}'
+                    f"of {', '.join(sorted(_Z3_LOGIC))}"
                 ) from None
     return "LRA"
 
@@ -373,9 +385,7 @@ def backend_precision(config, solver: str) -> Fraction:
     try:
         value = Fraction(raw)
     except (ValueError, ZeroDivisionError, ArithmeticError) as exc:
-        raise ValueError(
-            f'[dreal] precision = "{raw}" is not a number'
-        ) from exc
+        raise ValueError(f'[dreal] precision = "{raw}" is not a number') from exc
     if value <= 0:
         raise ValueError(
             f"[dreal] precision = {raw} must be positive; it is the "
@@ -396,8 +406,10 @@ def ode_settings(config) -> tuple[int | None, float | None]:
     setting has no reading. ``order`` is dReal's Taylor order (a whole number);
     ``step`` is the integration step size.
     """
-    return (_ode_setting(config, "ode-order", integral=True),
-            _ode_setting(config, "ode-step", integral=False))
+    return (
+        _ode_setting(config, "ode-order", integral=True),
+        _ode_setting(config, "ode-step", integral=False),
+    )
 
 
 def _ode_setting(config, key: str, *, integral: bool):
@@ -414,12 +426,13 @@ def _ode_setting(config, key: str, *, integral: bool):
     if value != value or value in (float("inf"), float("-inf")) or value <= 0:
         raise ValueError(
             f"[dreal] {key} = {raw} must be a positive number; it is a dReal "
-            "ODE integration setting")
+            "ODE integration setting"
+        )
     if integral:
         if value != int(value):
             raise ValueError(
-                f"[dreal] {key} = {raw} must be a whole number (dReal's Taylor "
-                "order)")
+                f"[dreal] {key} = {raw} must be a whole number (dReal's Taylor order)"
+            )
         return int(value)
     return value
 
@@ -440,7 +453,8 @@ def resolve_seed(config, printer=None) -> int:
         if printer is not None:
             printer.print_normal(
                 f"warning: -gen-seed {value} is negative and is ignored; "
-                "falling back to PYTHONHASHSEED")
+                "falling back to PYTHONHASHSEED"
+            )
     hash_seed = os.environ.get("PYTHONHASHSEED")
     if hash_seed is not None and hash_seed.isdigit():
         return int(hash_seed)
@@ -465,8 +479,16 @@ def warn_unpinned_hashseed(printer) -> None:
         )
 
 
-def scoped_verdict(pool, any_unresolved, decided_depths, max_depth, *,
-                   tag: str, nothing_found: str, unresolved_source: str):
+def scoped_verdict(
+    pool,
+    any_unresolved,
+    decided_depths,
+    max_depth,
+    *,
+    tag: str,
+    nothing_found: str,
+    unresolved_source: str,
+):
     """The run's verdict, and the line explaining it (or None).
 
     A verdict may only speak about the depths that were **decided**. The driver
@@ -487,8 +509,10 @@ def scoped_verdict(pool, any_unresolved, decided_depths, max_depth, *,
     if pool:
         return "False", None
     if any_unresolved:
-        return "Unknown", (f"[{tag}] {nothing_found}, but {unresolved_source} "
-                           "was unresolved: reporting Unknown, not True")
+        return "Unknown", (
+            f"[{tag}] {nothing_found}, but {unresolved_source} "
+            "was unresolved: reporting Unknown, not True"
+        )
     skipped = set(range(0, max_depth + 1)) - set(decided_depths)
     if skipped:
         seen = "/".join(str(d) for d in sorted(set(decided_depths))) or "none"
@@ -497,5 +521,6 @@ def scoped_verdict(pool, any_unresolved, decided_depths, max_depth, *,
             f"[{tag}] {nothing_found}, decided depth(s) {seen}, but depth(s) "
             f"{missed} of 0..{max_depth} were not decided -- reporting Unknown, "
             "not True: absence over a subset of depths is not absence up to the "
-            "bound")
+            "bound"
+        )
     return "True", None
