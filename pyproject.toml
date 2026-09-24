@@ -40,8 +40,6 @@ email = "sergio.quijano.r@gmail.com"
 # Fork CLI entry points. Upstream names kept as aliases for compatibility
 stlmc-x = "stlmc.cli.mc:main"
 stlmc-x-vis = "stlmc.cli.visualize:main"
-stlmc = "stlmc.cli.mc:main"
-stlmc-vis = "stlmc.cli.visualize:main"
 
 [project.urls]
 "Homepage"          = "https://github.com/squijanor/stlmc-x"
