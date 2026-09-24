@@ -43,10 +43,24 @@ def run_path(tmp_path, gen, goal="f2", bound=3):
     cfg.write_text(CFG.format(bound=bound, gen=gen))
     env = dict(os.environ, PYTHONPATH=SRC, PYTHONHASHSEED="0")
     proc = subprocess.run(
-        [sys.executable, "-c",
-         "from stlmc.cli.mc import main; main()",
-         MODEL, "-model-cfg", str(cfg), "-goal", goal, "-gen-seed", "0"],
-        cwd=str(tmp_path), env=env, capture_output=True, text=True, timeout=600)
+        [
+            sys.executable,
+            "-c",
+            "from stlmc.cli.mc import main; main()",
+            MODEL,
+            "-model-cfg",
+            str(cfg),
+            "-goal",
+            goal,
+            "-gen-seed",
+            "0",
+        ],
+        cwd=str(tmp_path),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     pools = [p for p in os.listdir(str(tmp_path)) if p.endswith(".counterexamples")]
     return proc.stdout, (str(tmp_path / pools[0]) if pools else None)
@@ -78,6 +92,7 @@ def radius_one(tmp_path_factory):
 
 # ============================================================ pool contents
 
+
 def test_the_pool_holds_no_blocking_artefacts(radius_one):
     """A radius-r block introduces indicator variables into the query. They are
     in every model the solver returns afterwards, so an unfiltered pool carries
@@ -97,12 +112,12 @@ def test_the_pool_shape_depends_on_depth_and_not_on_position(radius_one):
     _, payload, _ = radius_one
     by_depth = {}
     for word, assignment in zip(words(payload), payload[0]):
-        by_depth.setdefault(len(word), set()).add(
-            frozenset(v.id for v in assignment))
+        by_depth.setdefault(len(word), set()).add(frozenset(v.id for v in assignment))
     assert len(by_depth) > 1, "fixture must span more than one depth"
     for depth, shapes in by_depth.items():
         assert len(shapes) == 1, (
-            f"depth {depth}: {len(shapes)} different key sets in one depth")
+            f"depth {depth}: {len(shapes)} different key sets in one depth"
+        )
 
 
 def test_paths_are_distinct(radius_one):
@@ -115,7 +130,7 @@ def test_paths_are_distinct(radius_one):
     for depth_words in per_depth.values():
         assert len(set(depth_words)) == len(depth_words)
         for i, a in enumerate(depth_words):
-            for b in depth_words[i + 1:]:
+            for b in depth_words[i + 1 :]:
                 distance = sum(1 for x, y in zip(a, b) if x != y)
                 assert distance >= 2, (a, b)
 
@@ -135,15 +150,18 @@ def test_serialization_is_canonical(radius_one, tmp_path_factory):
 
 # ================================================================== verdicts
 
+
 def test_a_restricted_run_never_claims_absence_up_to_the_bound(tmp_path):
     """[gen] depths restricts what the verdict has seen. This goal has no
     counterexample at depth 1, so before the scoping rule the run reported
     "True up to bound 3" while depths 2 and 3 were never examined."""
-    stdout, pool = run_path(tmp_path, "    k-paths = 2\n    depths = 1",
-                            goal="f3", bound=3)
+    stdout, pool = run_path(
+        tmp_path, "    k-paths = 2\n    depths = 1", goal="f3", bound=3
+    )
     assert pool is None, "fixture assumes this goal does not falsify at depth 1"
     assert "result : True" not in stdout, (
-        "claimed absence up to the bound while skipping depths 2 and 3\n" + stdout)
+        "claimed absence up to the bound while skipping depths 2 and 3\n" + stdout
+    )
     assert "result : Unknown" in stdout
 
 
@@ -172,8 +190,9 @@ def test_a_counterexample_at_depth_zero_is_found_and_reported(tmp_path):
 def test_an_empty_target_depth_set_examines_nothing(tmp_path):
     """depths is clamped to 0..bound, so it can select nothing. A run that
     examined no depth at all may not report absence."""
-    stdout, pool = run_path(tmp_path, '    k-paths = 2\n    depths = "20/21"',
-                            goal="f2", bound=3)
+    stdout, pool = run_path(
+        tmp_path, '    k-paths = 2\n    depths = "20/21"', goal="f2", bound=3
+    )
     assert pool is None
     assert "result : True" not in stdout, stdout
     assert "selected no depth" in stdout
@@ -182,13 +201,15 @@ def test_an_empty_target_depth_set_examines_nothing(tmp_path):
 def test_the_reported_bound_is_where_a_counterexample_was_found(tmp_path):
     """The driver prints the returned bound as the one a counterexample was
     found at, so returning the configured bound misreports a shallow find."""
-    stdout, pool = run_path(tmp_path, "    k-paths = 2\n    depths = 1",
-                            goal="f1", bound=3)
+    stdout, pool = run_path(
+        tmp_path, "    k-paths = 2\n    depths = 1", goal="f1", bound=3
+    )
     assert pool is not None
     assert "result : False at bound 1" in stdout, stdout
 
 
 # ================================================== what an UNSAT establishes
+
 
 def test_exhaustion_under_a_coarsening_radius_is_not_absence(tmp_path):
     """A radius-r block excludes words never exhibited, so the UNSAT that ends
@@ -233,7 +254,7 @@ def test_an_undecided_depth_is_reported_rather_than_waited_out(tmp_path):
     A per-call bound below the backend's own resolution makes every query answer
     unknown, so the depth is undecided by construction rather than by relying on
     a particular model being hard to decide."""
-    gen = '    k-paths = 2\n    depths = 4\n    query-timeout = 0.001'
+    gen = "    k-paths = 2\n    depths = 4\n    query-timeout = 0.001"
     stdout, pool = run_path(tmp_path, gen, goal="f2", bound=4)
     assert pool is None
     assert "search UNRESOLVED" in stdout, stdout
@@ -250,12 +271,38 @@ def test_a_zero_budget_settles_nothing_and_says_so(tmp_path):
     assert "result : Unknown" in stdout
     assert "were not decided" in stdout
 
+
 def test_a_pool_with_no_labels_still_records_the_relaxation(radius_one):
-    """The two trailing pool elements are positional, so a strategy that has no
-    per-counterexample labels contributes an empty list rather than omitting the
-    slot -- otherwise the relaxation would land where a consumer reads labels.
+    """The three trailing pool elements are positional, so a strategy that has
+    no per-counterexample labels contributes an empty list rather than omitting
+    the slot -- otherwise the relaxation would land where a consumer reads
+    labels, and the structure signatures where it reads the relaxation.
     """
     _, payload, _ = radius_one
-    assert len(payload) == 11
+    assert len(payload) == 12
     assert payload[9] == [], "kappa_path has no label vocabulary"
     assert payload[10] == 0.0, "the exact backend answers under no relaxation"
+    assert isinstance(payload[11], list), "structure signatures ride the twelfth"
+
+
+def test_structure_signatures_are_pool_aligned_and_wellformed(radius_one):
+    """The twelfth pool element is one structure-signature record per
+    counterexample, in pool order. Each record's raw_word is the location word
+    the entry spells; structure_id is a non-empty key and is one-to-one with an
+    entry's (reduced_word, sigma), so entries sharing a skeleton share the key."""
+    _, payload, _ = radius_one
+    records = payload[11]
+    pool_words = words(payload)
+    assert len(records) == len(payload[0]) == len(pool_words)
+    for word, record in zip(pool_words, records):
+        assert set(record) == {"raw_word", "reduced_word", "sigma", "structure_id"}
+        assert tuple(str(m) for m in record["raw_word"]) == word
+        assert isinstance(record["structure_id"], str) and record["structure_id"]
+        assert all(len(pair) == 2 for pair in record["sigma"])
+    by_structure = {}
+    for record in records:
+        key = (tuple(record["reduced_word"]), tuple((i, v) for i, v in record["sigma"]))
+        by_structure.setdefault(key, set()).add(record["structure_id"])
+    assert all(len(ids) == 1 for ids in by_structure.values()), (
+        "structure_id must be one-to-one with (reduced_word, sigma)"
+    )

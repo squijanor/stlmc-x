@@ -49,10 +49,24 @@ def run_box(tmp_path, epsilon=THETA, extra="depths = 2", goal="f2", k_ic=1):
     cfg.write_text(CFG.format(epsilon=float(epsilon), extra=extra, k_ic=k_ic))
     env = dict(os.environ, PYTHONPATH=SRC, PYTHONHASHSEED="0")
     proc = subprocess.run(
-        [sys.executable, "-c",
-         "from stlmc.cli.mc import main; main()",
-         MODEL, "-model-cfg", str(cfg), "-goal", goal, "-gen-seed", "0"],
-        cwd=str(tmp_path), env=env, capture_output=True, text=True, timeout=600)
+        [
+            sys.executable,
+            "-c",
+            "from stlmc.cli.mc import main; main()",
+            MODEL,
+            "-model-cfg",
+            str(cfg),
+            "-goal",
+            goal,
+            "-gen-seed",
+            "0",
+        ],
+        cwd=str(tmp_path),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     pools = [p for p in os.listdir(str(tmp_path)) if p.endswith(".counterexamples")]
     return proc.stdout, (str(tmp_path / pools[0]) if pools else None)
@@ -87,13 +101,18 @@ def test_run_falsifies_and_writes_a_pool(run):
 
 def test_labels_are_aligned_and_from_the_vocabulary(run):
     _, _, payload = run
-    assert len(payload) == 11, (
-        "labels ride the tenth payload element and the backend relaxation the "
-        "eleventh")
+    assert len(payload) == 12, (
+        "labels ride the tenth payload element, the backend relaxation the "
+        "eleventh, and the structure signatures the twelfth"
+    )
     labels = payload[9]
     assert len(labels) == len(payload[0]), "one label per counterexample"
-    assert set(labels) <= {"deep", "structure-frontier", "ic-domain",
-                           "projected-domain"}
+    assert set(labels) <= {
+        "deep",
+        "structure-frontier",
+        "ic-domain",
+        "projected-domain",
+    }
 
 
 @pytest.fixture(scope="module")
@@ -133,7 +152,8 @@ def test_every_counterexample_falsifies(validation, run):
 
     bad = [r for r in validation if spurious(r)]
     assert not bad, "non-falsifying entries: {}".format(
-        [(r["index"], r["label"], r["verdict"], r["rho0"]) for r in bad[:5]])
+        [(r["index"], r["label"], r["verdict"], r["rho0"]) for r in bad[:5]]
+    )
 
 
 def test_deep_witnesses_are_theta_separated(run):
@@ -159,7 +179,7 @@ def test_deep_witnesses_are_theta_separated(run):
             assert gap >= THETA, (
                 f"deep witnesses {i} and {j} are {float(gap)} apart in "
                 f"L-inf, under theta {float(THETA)}"
-                )
+            )
 
 
 def test_frontier_markers_bound_the_pool(run):
@@ -174,7 +194,8 @@ def test_frontier_markers_bound_the_pool(run):
     _, _, payload = run
     labels = payload[9]
     markers = [
-        i for i, label in enumerate(labels)
+        i
+        for i, label in enumerate(labels)
         if label in ("structure-frontier", "ic-domain", "projected-domain")
     ]
     assert markers, "a converged box must be labeled"
@@ -183,8 +204,10 @@ def test_frontier_markers_bound_the_pool(run):
         at_extreme = False
         for var_id in ("x1_0_0", "x2_0_0"):
             values = ic_values(payload, var_id)
-            if values and (abs(values[index] - min(values)) <= tol
-                           or abs(values[index] - max(values)) <= tol):
+            if values and (
+                abs(values[index] - min(values)) <= tol
+                or abs(values[index] - max(values)) <= tol
+            ):
                 at_extreme = True
         assert at_extreme, f"marker {index} is interior on every axis"
 
@@ -247,9 +270,11 @@ def test_the_reported_bound_is_the_resolved_one(tmp_path):
     bound to its default, and rejects the words that disable one, so a run could
     report a bound nothing was holding to -- or fail before it started.
     """
-    for spelling, reported in (("300", "query-timeout=300.0s"),
-                               ("0", "query-timeout=off"),
-                               ('"off"', "query-timeout=off")):
+    for spelling, reported in (
+        ("300", "query-timeout=300.0s"),
+        ("0", "query-timeout=off"),
+        ('"off"', "query-timeout=off"),
+    ):
         work = tmp_path / spelling.strip('"')
         work.mkdir()
         stdout, _ = run_box(work, extra=f"depths = 2\n    query-timeout = {spelling}")
@@ -264,7 +289,9 @@ def test_a_restricted_run_never_claims_absence_up_to_the_bound(tmp_path):
     """
     stdout, _ = run_box(tmp_path, extra="depths = 1")
     assert "result : True" not in stdout, (
-        "claimed absence up to the bound while skipping depth 2\n" + stdout)
+        "claimed absence up to the bound while skipping depth 2\n" + stdout
+    )
+
 
 def test_a_zero_box_budget_is_no_budget_not_an_instant_true(tmp_path):
     """[gen] k-ic = 0 spells "off", like the section's other keys.
@@ -315,8 +342,8 @@ def multibox(tmp_path_factory):
     views of it, so the multi-box run happens once."""
     tmp = tmp_path_factory.mktemp("kappa_box_multibox")
     stdout, pool = run_box(
-        tmp, k_ic=3,
-        extra="depths = 2\n    k-witness = 3\n    bisect-iters = 4")
+        tmp, k_ic=3, extra="depths = 2\n    k-witness = 3\n    bisect-iters = 4"
+    )
     assert pool is not None, stdout
     assert stdout.count("box ") > 1, "this test needs more than one box\n" + stdout
     with open(pool, "rb") as handle:
@@ -345,15 +372,18 @@ def test_separation_is_not_imposed_across_depths(tmp_path):
     so their presence is what shows the axis survived.
     """
     stdout, pool = run_box(
-        tmp_path, k_ic=3,
-        extra='depths = "1/2"\n    k-witness = 3\n    bisect-iters = 4')
+        tmp_path,
+        k_ic=3,
+        extra='depths = "1/2"\n    k-witness = 3\n    bisect-iters = 4',
+    )
     assert pool is not None, stdout
     with open(pool, "rb") as handle:
         payload = pickle.load(handle)
     assert "over 2 target depth(s)" in stdout, stdout
     assert deep_pairs_within_theta(payload), (
         "no initial condition recurred across depths, so this run cannot "
-        "distinguish per-depth separation from global separation\n" + stdout)
+        "distinguish per-depth separation from global separation\n" + stdout
+    )
 
 
 def test_thinning_does_not_reach_across_depths(tmp_path):
@@ -365,9 +395,13 @@ def test_thinning_does_not_reach_across_depths(tmp_path):
     to control.
     """
     stdout, pool = run_box(
-        tmp_path, k_ic=3,
-        extra=('depths = "1/2"\n    k-witness = 3\n    bisect-iters = 4'
-               '\n    thin-ic = 0.05'))
+        tmp_path,
+        k_ic=3,
+        extra=(
+            'depths = "1/2"\n    k-witness = 3\n    bisect-iters = 4'
+            "\n    thin-ic = 0.05"
+        ),
+    )
     assert pool is not None, stdout
     with open(pool, "rb") as handle:
         payload = pickle.load(handle)
@@ -375,7 +409,8 @@ def test_thinning_does_not_reach_across_depths(tmp_path):
     close = deep_pairs_within_theta(payload, theta=Fraction(1, 20))
     assert close, (
         "thin-ic removed every witness pair within its own radius, so it is "
-        "still being applied across depths\n" + stdout)
+        "still being applied across depths\n" + stdout
+    )
 
 
 def test_the_pool_records_the_relaxation_it_was_generated_under(run, validation):
@@ -421,4 +456,42 @@ def test_one_entry_per_initial_condition_across_boxes(multibox):
     duplicates = [p for p, n in Counter(points).items() if n > 1]
     assert not duplicates, (
         "the same initial condition appears more than once: "
-        f"{[tuple(float(x) for x in p) for p in duplicates[:3]]}\n" + stdout)
+        f"{[tuple(float(x) for x in p) for p in duplicates[:3]]}\n" + stdout
+    )
+
+
+def _pool_word(assignment):
+    """The currentMode_k values of one assignment, as strings ordered by k."""
+    steps = []
+    for var, const in assignment.items():
+        vid = getattr(var, "id", "")
+        if vid.startswith("currentMode_"):
+            steps.append(
+                (
+                    int(vid.split("_", 1)[1]),
+                    str(int(round(float(Fraction(str(const.value)))))),
+                )
+            )
+    return [value for _, value in sorted(steps)]
+
+
+def test_structure_signatures_are_pool_aligned_and_wellformed(run):
+    """The twelfth pool element is one structure-signature record per witness,
+    in pool order. Each record's raw_word is the location word the witness
+    spells; structure_id is a non-empty key and is one-to-one with a witness's
+    (reduced_word, sigma), so a shared skeleton yields a shared key."""
+    _, _, payload = run
+    records = payload[11]
+    assert len(records) == len(payload[0]), "one record per counterexample"
+    for assignment, record in zip(payload[0], records):
+        assert set(record) == {"raw_word", "reduced_word", "sigma", "structure_id"}
+        assert [str(m) for m in record["raw_word"]] == _pool_word(assignment)
+        assert isinstance(record["structure_id"], str) and record["structure_id"]
+        assert all(len(pair) == 2 for pair in record["sigma"])
+    by_structure = {}
+    for record in records:
+        key = (tuple(record["reduced_word"]), tuple((i, v) for i, v in record["sigma"]))
+        by_structure.setdefault(key, set()).add(record["structure_id"])
+    assert all(len(ids) == 1 for ids in by_structure.values()), (
+        "structure_id must be one-to-one with (reduced_word, sigma)"
+    )
