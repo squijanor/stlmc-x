@@ -25,8 +25,8 @@ class StlModelChecker:
         self.printer = df.make_printer()
 
     def run(self):
-        self.runner.run(self.config_parser, self.model_parser, self.cmd_parser,
-                        self.logger, self.printer)
+        return self.runner.run(self.config_parser, self.model_parser,
+                               self.cmd_parser, self.logger, self.printer)
 
 
 class DriverFactory:

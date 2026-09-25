@@ -464,7 +464,11 @@ class BaseRunner(Runner):
                                 output_name, ext, output_name
                             )
                         )
+
+            return 0
         except SyntaxError as e:
             print("syntax error: {}".format(e))
+            return 1
         except Exception as e:
             print("error: {}".format(e))
+            return 1
